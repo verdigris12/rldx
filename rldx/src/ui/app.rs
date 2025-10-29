@@ -25,14 +25,33 @@ use super::panes::DetailTab;
 pub struct PaneField {
     pub label: String,
     pub value: String,
+    pub copy_value: String,
 }
 
 impl PaneField {
     fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self {
+            label: label.into(),
+            copy_value: value.clone(),
+            value,
+        }
+    }
+
+    fn with_copy_value(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        copy_value: impl Into<String>,
+    ) -> Self {
         Self {
             label: label.into(),
             value: value.into(),
+            copy_value: copy_value.into(),
         }
+    }
+
+    fn copy_text(&self) -> &str {
+        &self.copy_value
     }
 }
 
@@ -529,7 +548,7 @@ impl<'a> App<'a> {
             return Ok(());
         };
 
-        let value = field.value.trim();
+        let value = field.copy_text().trim();
         if value.is_empty() {
             self.set_status("Nothing to copy");
             return Ok(());
@@ -576,7 +595,7 @@ impl<'a> App<'a> {
 
     fn begin_edit(&mut self) {
         if let Some(field) = self.focused_field() {
-            let PaneField { label, value } = field;
+            let PaneField { label, value, .. } = field;
             self.editor.start(&label, &value);
             self.set_status(format!("Editing {} (read-only)", label));
         } else {
@@ -731,6 +750,7 @@ where
     };
 
     let first_phone = props.iter().find(|p| p.field == "TEL");
+    let total_phone_count = props.iter().filter(|p| p.field == "TEL").count();
     let first_email = props.iter().find(|p| p.field == "EMAIL");
 
     for item in order {
@@ -743,8 +763,13 @@ where
             "phone" => {
                 if let Some(prop) = first_phone {
                     let label = format_label_with_type("PHONE", &prop.params);
-                    let value = format_with_index(&prop.value, prop.seq);
-                    fields.push(PaneField::new(label, value));
+                    let copy_text = prop.value.trim().to_string();
+                    let display_value = if total_phone_count > 1 && !copy_text.is_empty() {
+                        format!("{} [{}]", copy_text, total_phone_count)
+                    } else {
+                        copy_text.clone()
+                    };
+                    fields.push(PaneField::with_copy_value(label, display_value, copy_text));
                 }
             }
             "email" => {
