@@ -1,16 +1,18 @@
 mod config;
 mod db;
+mod import;
 mod indexer;
 mod photo;
 mod search;
+mod ui;
 mod vcard_io;
 mod vdir;
-mod ui;
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use config::Config;
 use db::Database;
@@ -20,11 +22,45 @@ use db::Database;
 struct Cli {
     #[arg(long, default_value_t = false)]
     reindex: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Import(ImportArgs),
+}
+
+#[derive(Args, Debug)]
+struct ImportArgs {
+    #[arg(long, value_enum)]
+    format: ImportFormat,
+
+    #[arg(long)]
+    book: Option<String>,
+
+    #[arg(value_name = "FILE")]
+    input: String,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ImportFormat {
+    Google,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = config::load()?;
+
+    if let Some(command) = cli.command {
+        match command {
+            Command::Import(args) => {
+                handle_import(args, &config)?;
+                return Ok(());
+            }
+        }
+    }
 
     println!("Loaded configuration from {}", config.config_path.display());
 
@@ -45,6 +81,30 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
+    let normalize_report = vdir::normalize(&config.vdir)?;
+    if !normalize_report.needs_upgrade.is_empty() {
+        eprintln!(
+            "warning: {} cards require manual upgrade to vCard 4.0",
+            normalize_report.needs_upgrade.len()
+        );
+    }
+
+    let imported = match args.format {
+        ImportFormat::Google => import::google::import_google_contacts(
+            Path::new(&args.input),
+            config,
+            args.book.as_deref(),
+        )?,
+    };
+
+    println!("Imported {imported} contacts.");
+
+    let mut db = Database::open()?;
+    reindex(&mut db, config, false)?;
+    Ok(())
+}
+
 fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
     let files = vdir::list_vcf_files(&config.vdir)?;
     let paths_set: HashSet<_> = files.iter().cloned().collect();
@@ -53,7 +113,11 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
     for path in files {
         let state = vdir::compute_file_state(&path)?;
         let needs_update = match stored.get(&path) {
-            Some(existing) if !force && existing.sha1 == state.sha1 && existing.mtime == state.mtime => false,
+            Some(existing)
+                if !force && existing.sha1 == state.sha1 && existing.mtime == state.mtime =>
+            {
+                false
+            }
             _ => true,
         };
 

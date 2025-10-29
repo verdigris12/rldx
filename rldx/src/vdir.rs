@@ -117,11 +117,7 @@ fn process_cards(
 
     for card_src in cards {
         if !card_src.is_v4 {
-            if !report
-                .needs_upgrade
-                .iter()
-                .any(|p| p == original_path)
-            {
+            if !report.needs_upgrade.iter().any(|p| p == original_path) {
                 report.needs_upgrade.push(original_path.to_path_buf());
             }
             can_remove_original = false;
@@ -159,7 +155,7 @@ fn process_cards(
     Ok(())
 }
 
-fn select_filename(
+pub(crate) fn select_filename(
     uuid: &Uuid,
     used_names: &mut HashSet<String>,
     original_stem: Option<&str>,
@@ -195,7 +191,7 @@ fn select_filename(
     }
 }
 
-fn existing_stems(vdir: &Path) -> Result<HashSet<String>> {
+pub(crate) fn existing_stems(vdir: &Path) -> Result<HashSet<String>> {
     let mut stems = HashSet::new();
     let mut files = list_vcf_files(vdir)?;
     files.sort();
@@ -214,8 +210,8 @@ pub fn list_vcf_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn collect_vcf(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read directory {}", dir.display()))?
+    for entry in
+        fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -241,16 +237,13 @@ pub struct FileState {
 pub fn compute_file_state(path: &Path) -> Result<FileState> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("failed to read metadata for {}", path.display()))?;
-    let modified = metadata
-        .modified()
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let mtime = modified
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let data = fs::read(path)
-        .with_context(|| format!("failed to read file {}", path.display()))?;
+    let data = fs::read(path).with_context(|| format!("failed to read file {}", path.display()))?;
     let mut hasher = Sha1::new();
     hasher.update(&data);
     let sha1 = hasher.finalize().to_vec();
@@ -303,12 +296,10 @@ pub fn write_atomic(target: &Path, data: &[u8]) -> Result<()> {
                 )
             })?;
 
-        file.write_all(data).with_context(|| {
-            format!("failed to write temporary file {}", temp_path.display())
-        })?;
-        file.sync_all().with_context(|| {
-            format!("failed to sync temporary file {}", temp_path.display())
-        })?;
+        file.write_all(data)
+            .with_context(|| format!("failed to write temporary file {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync temporary file {}", temp_path.display()))?;
     }
 
     fs::rename(&temp_path, target).with_context(|| {
