@@ -752,6 +752,7 @@ where
     let first_phone = props.iter().find(|p| p.field == "TEL");
     let total_phone_count = props.iter().filter(|p| p.field == "TEL").count();
     let first_email = props.iter().find(|p| p.field == "EMAIL");
+    let total_email_count = props.iter().filter(|p| p.field == "EMAIL").count();
 
     for item in order {
         let key = item.as_ref().trim().to_ascii_lowercase();
@@ -762,7 +763,7 @@ where
             "alias" => fields.push(PaneField::new("ALIAS", alias_value.clone())),
             "phone" => {
                 if let Some(prop) = first_phone {
-                    let label = format_label_with_type("PHONE", &prop.params);
+                    let label = "PHONE".to_string();
                     let copy_text = prop.value.trim().to_string();
                     let display_value = if total_phone_count > 1 && !copy_text.is_empty() {
                         format!("{} [{}]", copy_text, total_phone_count)
@@ -774,9 +775,14 @@ where
             }
             "email" => {
                 if let Some(prop) = first_email {
-                    let label = format_label_with_type("EMAIL", &prop.params);
-                    let value = format_with_index(&prop.value, prop.seq);
-                    fields.push(PaneField::new(label, value));
+                    let label = "EMAIL".to_string();
+                    let copy_text = prop.value.trim().to_string();
+                    let display_value = if total_email_count > 1 && !copy_text.is_empty() {
+                        format!("{} [{}]", copy_text, total_email_count)
+                    } else {
+                        copy_text.clone()
+                    };
+                    fields.push(PaneField::with_copy_value(label, display_value, copy_text));
                 }
             }
             _ => {}
