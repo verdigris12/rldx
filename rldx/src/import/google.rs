@@ -132,16 +132,50 @@ fn convert_google_card(lines: &[String]) -> Result<Vcard> {
 fn unfold_lines(lines: &[String]) -> Vec<String> {
     let mut unfolded: Vec<String> = Vec::new();
     for line in lines {
-        if (line.starts_with(' ') || line.starts_with('\t')) && !unfolded.is_empty() {
-            let tail = line.trim_start_matches([' ', '\t']);
-            if let Some(last) = unfolded.last_mut() {
+        let mut handled = false;
+        if let Some(last) = unfolded.last_mut() {
+            if line.starts_with(' ') || line.starts_with('\t') {
+                if last.ends_with('=') && has_quoted_printable_encoding(last) {
+                    last.pop();
+                }
+                let tail = line.trim_start_matches([' ', '\t']);
                 last.push_str(tail);
+                handled = true;
+            } else if last.ends_with('=') && has_quoted_printable_encoding(last) {
+                last.pop();
+                last.push_str(line);
+                handled = true;
             }
-        } else {
+        }
+
+        if !handled {
             unfolded.push(line.clone());
         }
     }
     unfolded
+}
+
+fn has_quoted_printable_encoding(line: &str) -> bool {
+    if let Some((prefix, _)) = line.split_once(':') {
+        for part in prefix.split(';').skip(1) {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            if let Some((name, value)) = trimmed.split_once('=') {
+                if name.trim().eq_ignore_ascii_case("ENCODING")
+                    && value.trim().eq_ignore_ascii_case("QUOTED-PRINTABLE")
+                {
+                    return true;
+                }
+            } else if trimmed.eq_ignore_ascii_case("QUOTED-PRINTABLE") {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn convert_property(lhs: &str, value: &str) -> Result<Option<String>> {
@@ -372,29 +406,64 @@ fn format_property_line(
 
 fn decode_quoted_printable(input: &str) -> Result<String> {
     let mut bytes: Vec<u8> = Vec::with_capacity(input.len());
-    let mut iter = input.chars().peekable();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0usize;
 
-    while let Some(ch) = iter.next() {
-        if ch == '=' {
-            let first = iter.next();
-            let second = iter.next();
-            match (first, second) {
-                (Some('\r'), Some('\n')) => continue,
-                (Some('\n'), _) => continue,
-                (Some(a), Some(b)) => {
-                    let hex = format!("{}{}", a, b);
-                    let value = u8::from_str_radix(&hex, 16)
-                        .map_err(|_| anyhow!("invalid quoted-printable escape: ={hex}"))?;
-                    bytes.push(value);
+    while i < chars.len() {
+        match chars[i] {
+            '=' => {
+                if i + 1 >= chars.len() {
+                    // Trailing soft line break
+                    break;
                 }
-                _ => return Err(anyhow!("truncated quoted-printable escape")),
+
+                match chars[i + 1] {
+                    '\r' => {
+                        i += 2;
+                        if i < chars.len() && chars[i] == '\n' {
+                            i += 1;
+                        }
+                    }
+                    '\n' => {
+                        i += 2;
+                    }
+                    _ => {
+                        if i + 2 >= chars.len() {
+                            return Err(anyhow!("truncated quoted-printable escape"));
+                        }
+
+                        let a = chars[i + 1];
+                        let b = chars[i + 2];
+                        let value = decode_hex_pair(a, b).ok_or_else(|| {
+                            anyhow!(
+                                "invalid quoted-printable escape: ={}{}",
+                                a,
+                                b
+                            )
+                        })?;
+                        bytes.push(value);
+                        i += 3;
+                        continue;
+                    }
+                }
             }
-        } else {
-            bytes.push(ch as u8);
+            ch => {
+                bytes.push(ch as u8);
+                i += 1;
+                continue;
+            }
         }
+
+        // Continue to next character after handling soft line breaks.
     }
 
     String::from_utf8(bytes).map_err(|err| anyhow!("invalid UTF-8 in quoted-printable: {err}"))
+}
+
+fn decode_hex_pair(a: char, b: char) -> Option<u8> {
+    let high = a.to_digit(16)?;
+    let low = b.to_digit(16)?;
+    Some(((high << 4) | low) as u8)
 }
 
 fn clean_quotes(value: &str) -> String {
@@ -422,5 +491,61 @@ fn media_type_from_extension(value: &str) -> Option<String> {
         "PNG" => Some("image/png".to_string()),
         "GIF" => Some("image/gif".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unfold_lines_handles_quoted_printable_soft_breaks() {
+        let lines = vec![
+            "NOTE;ENCODING=QUOTED-PRINTABLE:Hello=".to_string(),
+            "World".to_string(),
+        ];
+
+        let unfolded = unfold_lines(&lines);
+        assert_eq!(unfolded, vec!["NOTE;ENCODING=QUOTED-PRINTABLE:HelloWorld".to_string()]);
+    }
+
+    #[test]
+    fn unfold_lines_handles_soft_breaks_with_leading_whitespace() {
+        let lines = vec![
+            "NOTE;ENCODING=QUOTED-PRINTABLE:Hello=".to_string(),
+            " World".to_string(),
+        ];
+
+        let unfolded = unfold_lines(&lines);
+        assert_eq!(unfolded, vec!["NOTE;ENCODING=QUOTED-PRINTABLE:HelloWorld".to_string()]);
+    }
+
+    #[test]
+    fn unfold_lines_does_not_merge_non_qp_lines() {
+        let lines = vec![
+            "PHOTO;ENCODING=BASE64:abc=".to_string(),
+            "END:VCARD".to_string(),
+        ];
+
+        let unfolded = unfold_lines(&lines);
+        assert_eq!(unfolded, lines);
+    }
+
+    #[test]
+    fn decode_quoted_printable_handles_soft_breaks() {
+        let decoded = decode_quoted_printable("Soft=\nBreak").unwrap();
+        assert_eq!(decoded, "SoftBreak");
+    }
+
+    #[test]
+    fn decode_quoted_printable_handles_trailing_equals() {
+        let decoded = decode_quoted_printable("Trailing=").unwrap();
+        assert_eq!(decoded, "Trailing");
+    }
+
+    #[test]
+    fn decode_quoted_printable_decodes_hex_pairs() {
+        let decoded = decode_quoted_printable("Line=3D1").unwrap();
+        assert_eq!(decoded, "Line=1");
     }
 }
