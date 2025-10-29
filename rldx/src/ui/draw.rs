@@ -320,14 +320,9 @@ fn selection_style(app: &App) -> Style {
         .bg(color(colors.selection_bg))
 }
 
-fn border_style(app: &App, active: bool) -> Style {
+fn border_style(app: &App, _active: bool) -> Style {
     let colors = app.ui_colors();
-    let fg = if active {
-        colors.selection_fg
-    } else {
-        colors.border
-    };
-    Style::default().fg(color(fg))
+    Style::default().fg(color(colors.border))
 }
 
 fn header_text_style(app: &App) -> Style {
