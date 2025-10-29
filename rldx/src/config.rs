@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use directories::BaseDirs;
+use serde::de::Deserializer;
 use serde::Deserialize;
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -15,6 +16,49 @@ pub struct Config {
     pub vdir: PathBuf,
     pub fields_first_pane: Vec<String>,
     pub keys: Keys,
+    pub ui: UiConfig,
+    pub commands: Commands,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiConfig {
+    pub colors: UiColors,
+    pub icons: UiIcons,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiColors {
+    pub border: RgbColor,
+    pub selection_bg: RgbColor,
+    pub selection_fg: RgbColor,
+    pub separator: RgbColor,
+    pub status_fg: RgbColor,
+    pub status_bg: RgbColor,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiIcons {
+    pub address_book: String,
+    pub contact: String,
+    pub organization: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RgbColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct Commands {
+    pub copy: Option<CommandExec>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandExec {
+    pub program: String,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +99,10 @@ struct ConfigFile {
     fields_first_pane: Vec<String>,
     #[serde(default)]
     keys: Keys,
+    #[serde(default)]
+    ui: UiFile,
+    #[serde(default)]
+    commands: CommandsFile,
 }
 
 impl Default for ConfigFile {
@@ -63,6 +111,8 @@ impl Default for ConfigFile {
             vdir: None,
             fields_first_pane: default_fields_first_pane(),
             keys: Keys::default(),
+            ui: UiFile::default(),
+            commands: CommandsFile::default(),
         }
     }
 }
@@ -91,7 +141,8 @@ pub fn config_path() -> Result<PathBuf> {
 pub fn ensure_config_dir() -> Result<()> {
     let dir = config_root()?;
     if !dir.exists() {
-        fs::create_dir_all(&dir).with_context(|| format!("failed to create config dir: {}", dir.display()))?;
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create config dir: {}", dir.display()))?;
     }
     Ok(())
 }
@@ -131,16 +182,22 @@ pub fn load() -> Result<Config> {
         vdir,
         fields_first_pane: cfg_file.fields_first_pane,
         keys: cfg_file.keys,
+        ui: cfg_file.ui.into(),
+        commands: cfg_file.commands.into(),
     })
 }
 
 fn warn_unknown_keys(value: &toml::Value) {
-    let Some(table) = value.as_table() else { return; };
+    let Some(table) = value.as_table() else {
+        return;
+    };
 
     let known = HashSet::from([
         "vdir".to_string(),
         "fields_first_pane".to_string(),
         "keys".to_string(),
+        "ui".to_string(),
+        "commands".to_string(),
     ]);
 
     for key in table.keys() {
@@ -168,6 +225,242 @@ fn warn_unknown_keys(value: &toml::Value) {
                 }
             }
         }
+    }
+
+    if let Some(ui_val) = table.get("ui") {
+        warn_unknown_ui_keys(ui_val);
+    }
+
+    if let Some(commands_val) = table.get("commands") {
+        warn_unknown_commands_keys(commands_val);
+    }
+}
+
+fn warn_unknown_ui_keys(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+
+    let known = HashSet::from(["colors".to_string(), "icons".to_string()]);
+
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown ui.* entry `{}`", key);
+        }
+    }
+
+    if let Some(colors_val) = table.get("colors") {
+        warn_unknown_ui_colors(colors_val);
+    }
+    if let Some(icons_val) = table.get("icons") {
+        warn_unknown_ui_icons(icons_val);
+    }
+}
+
+fn warn_unknown_ui_colors(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from([
+        "border".to_string(),
+        "selection_bg".to_string(),
+        "selection_fg".to_string(),
+        "separator".to_string(),
+        "status_fg".to_string(),
+        "status_bg".to_string(),
+    ]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown ui.colors entry `{}`", key);
+        }
+    }
+}
+
+fn warn_unknown_ui_icons(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from([
+        "address_book".to_string(),
+        "contact".to_string(),
+        "organization".to_string(),
+    ]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown ui.icons entry `{}`", key);
+        }
+    }
+}
+
+fn warn_unknown_commands_keys(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from(["copy".to_string()]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown commands entry `{}`", key);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct UiFile {
+    colors: UiColorsFile,
+    icons: UiIconsFile,
+}
+
+impl Default for UiFile {
+    fn default() -> Self {
+        Self {
+            colors: UiColorsFile::default(),
+            icons: UiIconsFile::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct UiColorsFile {
+    border: RgbColor,
+    selection_bg: RgbColor,
+    selection_fg: RgbColor,
+    separator: RgbColor,
+    status_fg: RgbColor,
+    status_bg: RgbColor,
+}
+
+impl Default for UiColorsFile {
+    fn default() -> Self {
+        Self {
+            border: RgbColor::new(255, 165, 0),
+            selection_bg: RgbColor::new(255, 165, 0),
+            selection_fg: RgbColor::new(0, 0, 0),
+            separator: RgbColor::new(255, 165, 0),
+            status_fg: RgbColor::new(255, 165, 0),
+            status_bg: RgbColor::new(0, 0, 0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct UiIconsFile {
+    address_book: String,
+    contact: String,
+    organization: String,
+}
+
+impl Default for UiIconsFile {
+    fn default() -> Self {
+        Self {
+            address_book: "@".to_string(),
+            contact: "👤 ".to_string(),
+            organization: "🏢 ".to_string(),
+        }
+    }
+}
+
+impl From<UiFile> for UiConfig {
+    fn from(file: UiFile) -> Self {
+        Self {
+            colors: UiColors {
+                border: file.colors.border,
+                selection_bg: file.colors.selection_bg,
+                selection_fg: file.colors.selection_fg,
+                separator: file.colors.separator,
+                status_fg: file.colors.status_fg,
+                status_bg: file.colors.status_bg,
+            },
+            icons: UiIcons {
+                address_book: file.icons.address_book,
+                contact: file.icons.contact,
+                organization: file.icons.organization,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct CommandsFile {
+    copy: Option<CommandDef>,
+}
+
+impl Default for CommandsFile {
+    fn default() -> Self {
+        Self { copy: None }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum CommandDef {
+    Simple(String),
+    List(Vec<String>),
+}
+
+impl From<CommandsFile> for Commands {
+    fn from(file: CommandsFile) -> Self {
+        Self {
+            copy: file.copy.and_then(CommandExec::from_def),
+        }
+    }
+}
+
+impl CommandExec {
+    fn from_def(def: CommandDef) -> Option<Self> {
+        match def {
+            CommandDef::Simple(cmd) => {
+                let trimmed = cmd.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(Self {
+                        program: trimmed.to_string(),
+                        args: Vec::new(),
+                    })
+                }
+            }
+            CommandDef::List(mut parts) => {
+                if parts.is_empty() {
+                    return None;
+                }
+                let program = parts.remove(0);
+                Some(Self {
+                    program,
+                    args: parts,
+                })
+            }
+        }
+    }
+}
+
+impl RgbColor {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RgbColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            Array([u8; 3]),
+            Map { r: u8, g: u8, b: u8 },
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        let (r, g, b) = match helper {
+            Helper::Array(values) => (values[0], values[1], values[2]),
+            Helper::Map { r, g, b } => (r, g, b),
+        };
+        Ok(RgbColor { r, g, b })
     }
 }
 

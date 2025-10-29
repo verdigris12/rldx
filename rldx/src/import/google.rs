@@ -7,7 +7,6 @@ use crate::config::Config;
 use crate::vcard_io;
 use crate::vdir;
 
-use uuid::Uuid;
 use vcard4::Vcard;
 
 const BEGIN_VCARD: &str = "BEGIN:VCARD";
@@ -435,11 +434,7 @@ fn decode_quoted_printable(input: &str) -> Result<String> {
                         let a = chars[i + 1];
                         let b = chars[i + 2];
                         let value = decode_hex_pair(a, b).ok_or_else(|| {
-                            anyhow!(
-                                "invalid quoted-printable escape: ={}{}",
-                                a,
-                                b
-                            )
+                            anyhow!("invalid quoted-printable escape: ={}{}", a, b)
                         })?;
                         bytes.push(value);
                         i += 3;
@@ -506,7 +501,10 @@ mod tests {
         ];
 
         let unfolded = unfold_lines(&lines);
-        assert_eq!(unfolded, vec!["NOTE;ENCODING=QUOTED-PRINTABLE:HelloWorld".to_string()]);
+        assert_eq!(
+            unfolded,
+            vec!["NOTE;ENCODING=QUOTED-PRINTABLE:HelloWorld".to_string()]
+        );
     }
 
     #[test]
@@ -517,7 +515,10 @@ mod tests {
         ];
 
         let unfolded = unfold_lines(&lines);
-        assert_eq!(unfolded, vec!["NOTE;ENCODING=QUOTED-PRINTABLE:HelloWorld".to_string()]);
+        assert_eq!(
+            unfolded,
+            vec!["NOTE;ENCODING=QUOTED-PRINTABLE:HelloWorld".to_string()]
+        );
     }
 
     #[test]

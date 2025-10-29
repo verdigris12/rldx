@@ -1,7 +1,9 @@
-use std::io::stdout;
+use std::io::{stdout, Write};
+use std::path::{Component, Path};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -11,7 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use serde_json::Value;
 
-use crate::config::Config;
+use crate::config::{CommandExec, Config, UiColors};
 use crate::db::{ContactItem, ContactListEntry, Database, PropRow};
 use crate::search;
 
@@ -31,6 +33,21 @@ impl PaneField {
             label: label.into(),
             value: value.into(),
         }
+    }
+}
+
+const DEFAULT_ADDRESS_BOOK: &str = "default";
+
+#[derive(Debug, Clone)]
+pub struct SearchRow {
+    pub text: String,
+    pub depth: u16,
+    pub contact_index: Option<usize>,
+}
+
+impl SearchRow {
+    pub fn selectable(&self) -> bool {
+        self.contact_index.is_some()
     }
 }
 
@@ -60,6 +77,8 @@ pub struct App<'a> {
     pub card_field_index: usize,
     pub tab_fields: [Vec<PaneField>; DetailTab::COUNT],
     pub tab_field_indices: [usize; DetailTab::COUNT],
+    pub search_rows: Vec<SearchRow>,
+    pub selected_row: Option<usize>,
 }
 
 impl<'a> App<'a> {
@@ -84,7 +103,10 @@ impl<'a> App<'a> {
             card_field_index: 0,
             tab_fields: Default::default(),
             tab_field_indices: [0; DetailTab::COUNT],
+            search_rows: Vec::new(),
+            selected_row: None,
         };
+        app.rebuild_search_rows();
         app.load_selection()?;
         Ok(app)
     }
@@ -168,6 +190,9 @@ impl<'a> App<'a> {
                     self.advance_field(-1);
                 }
             }
+            KeyCode::Char(' ') => {
+                self.copy_focused_value()?;
+            }
             KeyCode::Char(c) => {
                 let lower = c.to_ascii_lowercase();
                 if self.focus_by_digit(c) {
@@ -177,13 +202,13 @@ impl<'a> App<'a> {
                         'j' => self.move_selection(1)?,
                         'k' => self.move_selection(-1)?,
                         'e' => {
-                            self.status = Some("Editing is not yet implemented".to_string());
+                            self.set_status("Editing is not yet implemented");
                         }
                         'i' => {
-                            self.status = Some("Image fetch is not yet implemented".to_string());
+                            self.set_status("Image fetch is not yet implemented");
                         }
                         'l' => {
-                            self.status = Some("Language toggle not yet implemented".to_string());
+                            self.set_status("Language toggle not yet implemented");
                         }
                         _ => {}
                     }
@@ -220,26 +245,142 @@ impl<'a> App<'a> {
     }
 
     fn refresh_contacts(&mut self) -> Result<()> {
+        let previous_uuid = self
+            .contacts
+            .get(self.selected)
+            .map(|entry| entry.uuid.clone());
+
         let normalized = search::normalize_query(&self.query);
         self.contacts = if let Some(filter) = normalized.as_ref() {
             self.db.list_contacts(Some(filter))?
         } else {
             self.db.list_contacts(None)?
         };
+
+        self.sort_contacts();
+
+        if let Some(uuid) = previous_uuid {
+            if let Some(index) = self.contacts.iter().position(|entry| entry.uuid == uuid) {
+                self.selected = index;
+            }
+        }
+
         if self.contacts.is_empty() {
             self.selected = 0;
+        } else if self.selected >= self.contacts.len() {
+            self.selected = self.contacts.len() - 1;
+        }
+
+        self.rebuild_search_rows();
+
+        if self.contacts.is_empty() {
             self.current_contact = None;
             self.current_props.clear();
             self.aliases.clear();
             self.languages.clear();
             self.rebuild_field_views();
         } else {
-            if self.selected >= self.contacts.len() {
-                self.selected = self.contacts.len() - 1;
-            }
             self.load_selection()?;
         }
         Ok(())
+    }
+
+    fn rebuild_search_rows(&mut self) {
+        self.search_rows.clear();
+
+        if self.contacts.is_empty() {
+            self.selected_row = None;
+            return;
+        }
+
+        let mut last_chain: Vec<String> = Vec::new();
+
+        for (index, contact) in self.contacts.iter().enumerate() {
+            let chain = self.address_book_chain(&contact.path);
+
+            let mut shared_prefix = 0;
+            while shared_prefix < chain.len()
+                && shared_prefix < last_chain.len()
+                && chain[shared_prefix] == last_chain[shared_prefix]
+            {
+                shared_prefix += 1;
+            }
+
+            for level in shared_prefix..chain.len() {
+                let name = &chain[level];
+                let text = format!("{}{}", self.config.ui.icons.address_book, name);
+                self.search_rows.push(SearchRow {
+                    text,
+                    depth: level as u16,
+                    contact_index: None,
+                });
+            }
+
+            let depth = chain.len() as u16;
+            last_chain = chain.clone();
+
+            let icon = if contact_is_org(contact) {
+                &self.config.ui.icons.organization
+            } else {
+                &self.config.ui.icons.contact
+            };
+            let text = format!("{}{}", icon, contact.display_fn.to_uppercase());
+            self.search_rows.push(SearchRow {
+                text,
+                depth,
+                contact_index: Some(index),
+            });
+        }
+
+        self.update_selected_row();
+    }
+
+    fn address_book_chain(&self, path: &Path) -> Vec<String> {
+        address_book_chain_from(&self.config.vdir, path)
+    }
+
+    fn update_selected_row(&mut self) {
+        if self.contacts.is_empty() || self.search_rows.is_empty() {
+            self.selected_row = None;
+            return;
+        }
+
+        if self.selected >= self.contacts.len() {
+            self.selected = self.contacts.len() - 1;
+        }
+
+        if let Some((idx, _)) = self
+            .search_rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contact_index == Some(self.selected))
+        {
+            self.selected_row = Some(idx);
+            return;
+        }
+
+        if let Some((idx, contact_index)) = self
+            .search_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| row.contact_index.map(|ci| (idx, ci)))
+            .next()
+        {
+            self.selected = contact_index;
+            self.selected_row = Some(idx);
+        } else {
+            self.selected_row = None;
+        }
+    }
+
+    fn sort_contacts(&mut self) {
+        self.contacts.sort_by_cached_key(|entry| {
+            let book = address_book_chain_from(&self.config.vdir, &entry.path)
+                .join("/")
+                .to_ascii_lowercase();
+            let name = entry.display_fn.to_ascii_lowercase();
+            (book, name)
+        });
     }
 
     fn move_selection(&mut self, delta: isize) -> Result<()> {
@@ -267,6 +408,7 @@ impl<'a> App<'a> {
             self.rebuild_field_views();
             return Ok(());
         }
+        self.update_selected_row();
         let contact = &self.contacts[self.selected];
         self.current_contact = self.db.get_contact(&contact.uuid)?;
         self.current_props = self.db.get_props(&contact.uuid)?;
@@ -363,6 +505,70 @@ impl<'a> App<'a> {
         }
     }
 
+    fn focused_field(&self) -> Option<PaneField> {
+        match self.focused_pane {
+            PaneFocus::Card => self.card_fields.get(self.card_field_index).cloned(),
+            PaneFocus::Detail(tab) => {
+                let idx = tab.index();
+                self.tab_fields[idx]
+                    .get(self.tab_field_indices[idx])
+                    .cloned()
+            }
+            PaneFocus::Search => None,
+        }
+    }
+
+    fn copy_focused_value(&mut self) -> Result<()> {
+        let Some(field) = self.focused_field() else {
+            self.set_status("Nothing to copy");
+            return Ok(());
+        };
+
+        let value = field.value.trim();
+        if value.is_empty() {
+            self.set_status("Nothing to copy");
+            return Ok(());
+        }
+
+        if let Some(command) = self.config.commands.copy.clone() {
+            match self.run_copy_command(&command, value) {
+                Ok(_) => self.set_status("Field copied!"),
+                Err(err) => self.set_status(format!("Copy failed: {}", err)),
+            }
+        } else {
+            self.set_status("Copy command not configured");
+        }
+
+        Ok(())
+    }
+
+    fn run_copy_command(&self, command: &CommandExec, value: &str) -> Result<()> {
+        let mut child = Command::new(&command.program)
+            .args(&command.args)
+            .stdin(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn `{}`", command.program))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(value.as_bytes())?;
+        }
+
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("`{}` exited with {}", command.program, status);
+        }
+
+        Ok(())
+    }
+
+    fn set_status<S: Into<String>>(&mut self, message: S) {
+        self.status = Some(message.into());
+    }
+
+    pub fn ui_colors(&self) -> &UiColors {
+        &self.config.ui.colors
+    }
+
     fn focus_by_digit(&mut self, digit: char) -> bool {
         match digit {
             '1' => {
@@ -378,6 +584,36 @@ impl<'a> App<'a> {
                 }
             }
         }
+    }
+}
+
+fn contact_is_org(entry: &ContactListEntry) -> bool {
+    if let Some(kind) = entry.kind.as_deref() {
+        if kind.eq_ignore_ascii_case("org") || kind.eq_ignore_ascii_case("organization") {
+            return true;
+        }
+    }
+    entry.primary_org.is_some()
+}
+
+fn address_book_chain_from(vdir: &Path, path: &Path) -> Vec<String> {
+    let relative = path.strip_prefix(vdir).unwrap_or(path);
+    let mut components: Vec<String> = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(os_str) => Some(os_str.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+
+    if !components.is_empty() {
+        components.pop();
+    }
+
+    if components.is_empty() {
+        vec![DEFAULT_ADDRESS_BOOK.to_string()]
+    } else {
+        components
     }
 }
 
@@ -428,17 +664,20 @@ fn build_card_fields(props: &[PropRow], aliases: &[String]) -> Vec<PaneField> {
         fields.push(PaneField::new("LNAME", "—"));
     }
 
-    if !aliases.is_empty() {
-        fields.push(PaneField::new("ALIAS", aliases.join("/")));
-    }
+    let alias_value = if aliases.is_empty() {
+        "—".to_string()
+    } else {
+        aliases.join("/")
+    };
+    fields.push(PaneField::new("ALIAS", alias_value));
 
-    for prop in props.iter().filter(|p| p.field == "TEL") {
+    if let Some(prop) = props.iter().find(|p| p.field == "TEL") {
         let label = format_label_with_type("PHONE", &prop.params);
         let value = format_with_index(&prop.value, prop.seq);
         fields.push(PaneField::new(label, value));
     }
 
-    for prop in props.iter().filter(|p| p.field == "EMAIL") {
+    if let Some(prop) = props.iter().find(|p| p.field == "EMAIL") {
         let label = format_label_with_type("EMAIL", &prop.params);
         let value = format_with_index(&prop.value, prop.seq);
         fields.push(PaneField::new(label, value));
