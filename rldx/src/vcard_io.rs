@@ -11,7 +11,6 @@ use vcard4::{parse, DateTime, Vcard};
 #[derive(Debug, Clone)]
 pub struct CardWithSource {
     pub card: Vcard,
-    pub raw_block: String,
     pub is_v4: bool,
 }
 
@@ -24,7 +23,9 @@ pub fn parse_file(path: &Path) -> Result<Vec<Vcard>> {
 
 /// Parse a UTF-8 string into `Vcard` values.
 pub fn parse_str(input: &str) -> Result<Vec<Vcard>> {
-    parse(input).map_err(|err| anyhow!(err)).context("parsing vCard data")
+    parse(input)
+        .map_err(|err| anyhow!(err))
+        .context("parsing vCard data")
 }
 
 /// Parse a UTF-8 string and also capture the raw block for each vCard.
@@ -47,11 +48,7 @@ pub fn parse_str_with_source(input: &str) -> Result<Vec<CardWithSource>> {
             let is_v4 = raw_block
                 .lines()
                 .any(|line| line.trim().eq_ignore_ascii_case("VERSION:4.0"));
-            CardWithSource {
-                card,
-                raw_block,
-                is_v4,
-            }
+            CardWithSource { card, is_v4 }
         })
         .collect())
 }

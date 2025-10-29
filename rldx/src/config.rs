@@ -463,7 +463,3 @@ impl<'de> serde::Deserialize<'de> for RgbColor {
         Ok(RgbColor { r, g, b })
     }
 }
-
-pub fn config_exists() -> Result<bool> {
-    Ok(config_path()?.exists())
-}

@@ -13,18 +13,9 @@ use crate::vcard_io;
 use crate::vdir::FileState;
 
 #[derive(Debug, Clone)]
-pub struct FnVariant {
-    pub value: String,
-    pub language: Option<String>,
-    pub pref: Option<u8>,
-}
-
-#[derive(Debug, Clone)]
 pub struct IndexedRecord {
     pub item: IndexedItem,
     pub props: Vec<IndexedProp>,
-    pub aliases: Vec<String>,
-    pub fn_variants: Vec<FnVariant>,
 }
 
 pub fn build_record(
@@ -33,14 +24,17 @@ pub fn build_record(
     state: &FileState,
     preferred_language: Option<&str>,
 ) -> Result<IndexedRecord> {
-    let uuid_str = vcard_io::card_uid(card)
-        .ok_or_else(|| anyhow!("card missing UID: {}", path.display()))?;
-    let uuid = Uuid::parse_str(&uuid_str)
-        .map_err(|_| anyhow!("card UID is not a UUID: {}", uuid_str))?;
+    let uuid_str =
+        vcard_io::card_uid(card).ok_or_else(|| anyhow!("card missing UID: {}", path.display()))?;
+    let uuid =
+        Uuid::parse_str(&uuid_str).map_err(|_| anyhow!("card UID is not a UUID: {}", uuid_str))?;
 
-    let (display_fn, display_lang, fn_variants) = select_display_fn(card, preferred_language);
+    let (display_fn, display_lang) = select_display_fn(card, preferred_language);
 
-    let rev = card.rev.as_ref().map(|rev| date_time_property_to_string(rev));
+    let rev = card
+        .rev
+        .as_ref()
+        .map(|rev| date_time_property_to_string(rev));
     let has_photo = !card.photo.is_empty();
     let has_logo = !card.logo.is_empty();
 
@@ -63,8 +57,6 @@ pub fn build_record(
     collect_misc_props(card, &mut counters, &mut props);
     collect_extension_props(card, &mut counters, &mut props);
 
-    let aliases = compute_aliases(card, &display_fn);
-
     let item = IndexedItem {
         uuid: uuid.to_string(),
         path: path.to_path_buf(),
@@ -77,19 +69,10 @@ pub fn build_record(
         lang_pref: display_lang,
     };
 
-    Ok(IndexedRecord {
-        item,
-        props,
-        aliases,
-        fn_variants,
-    })
+    Ok(IndexedRecord { item, props })
 }
 
-fn select_display_fn(
-    card: &Vcard,
-    preferred_language: Option<&str>,
-) -> (String, Option<String>, Vec<FnVariant>) {
-    let mut variants = Vec::new();
+fn select_display_fn(card: &Vcard, preferred_language: Option<&str>) -> (String, Option<String>) {
     let mut best_index: Option<usize> = None;
     let mut best_pref: u8 = u8::MAX;
     let mut best_lang_match = false;
@@ -100,19 +83,14 @@ fn select_display_fn(
             .as_ref()
             .and_then(|p| p.pref)
             .unwrap_or(u8::MAX);
-        let lang = prop
-            .parameters
-            .as_ref()
-            .and_then(|p| p.language.clone());
+        let lang = prop.parameters.as_ref().and_then(|p| p.language.clone());
         let lang_match = preferred_language
-            .map(|pref_lang| lang.as_deref().map(|l| l.eq_ignore_ascii_case(pref_lang)).unwrap_or(false))
+            .map(|pref_lang| {
+                lang.as_deref()
+                    .map(|l| l.eq_ignore_ascii_case(pref_lang))
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
-
-        variants.push(FnVariant {
-            value: prop.value.clone(),
-            language: lang.clone(),
-            pref: prop.parameters.as_ref().and_then(|p| p.pref),
-        });
 
         let replace = match best_index {
             None => true,
@@ -131,13 +109,10 @@ fn select_display_fn(
     let default_name = "Unnamed".to_string();
     if let Some(index) = best_index {
         let prop = &card.formatted_name[index];
-        let language = prop
-            .parameters
-            .as_ref()
-            .and_then(|p| p.language.clone());
-        (prop.value.clone(), language, variants)
+        let language = prop.parameters.as_ref().and_then(|p| p.language.clone());
+        (prop.value.clone(), language)
     } else {
-        (default_name, None, variants)
+        (default_name, None)
     }
 }
 
@@ -172,8 +147,7 @@ fn collect_name_props(
             "N",
             value,
             name.parameters.as_ref(),
-            card
-                .formatted_name
+            card.formatted_name
                 .first()
                 .map(|p| p.value.as_str())
                 .unwrap_or(""),
@@ -298,14 +272,7 @@ fn collect_address_props(
             .as_ref()
             .and_then(|p| p.label.clone())
             .unwrap_or_else(|| prop.value.to_string());
-        push_prop(
-            props,
-            counters,
-            "ADR",
-            value,
-            prop.parameters.as_ref(),
-            "",
-        );
+        push_prop(props, counters, "ADR", value, prop.parameters.as_ref(), "");
     }
 }
 
@@ -500,14 +467,7 @@ fn collect_extension_props(
     for ext in &card.extensions {
         let value = ext.value.to_string();
         let field = ext.name.to_uppercase();
-        push_prop(
-            props,
-            counters,
-            &field,
-            value,
-            ext.parameters.as_ref(),
-            "",
-        );
+        push_prop(props, counters, &field, value, ext.parameters.as_ref(), "");
     }
 }
 
@@ -553,7 +513,10 @@ fn parameters_to_json(parameters: Option<&Parameters>) -> Value {
         }
         if let Some(pid) = &params.pid {
             let values = pid.iter().map(|p| p.to_string()).collect::<Vec<_>>();
-            object.insert("pid".to_string(), Value::Array(values.into_iter().map(Value::String).collect()));
+            object.insert(
+                "pid".to_string(),
+                Value::Array(values.into_iter().map(Value::String).collect()),
+            );
         }
         if let Some(types) = &params.types {
             let values = types
@@ -578,7 +541,10 @@ fn parameters_to_json(parameters: Option<&Parameters>) -> Value {
             object.insert("geo".to_string(), Value::String(geo.to_string()));
         }
         if let Some(tz) = &params.timezone {
-            object.insert("timezone".to_string(), Value::String(timezone_to_string(tz)));
+            object.insert(
+                "timezone".to_string(),
+                Value::String(timezone_to_string(tz)),
+            );
         }
         if let Some(label) = &params.label {
             object.insert("label".to_string(), Value::String(label.clone()));
@@ -610,32 +576,6 @@ fn timezone_to_string(param: &TimeZoneParameter) -> String {
         TimeZoneParameter::Uri(value) => value.to_string(),
         TimeZoneParameter::UtcOffset(offset) => offset.to_string(),
     }
-}
-
-fn compute_aliases(card: &Vcard, display_fn: &str) -> Vec<String> {
-    let mut aliases = Vec::new();
-    for prop in &card.nickname {
-        if !prop.value.is_empty() {
-            aliases.push(prop.value.clone());
-        }
-    }
-    for prop in &card.formatted_name {
-        if prop.value != display_fn && !prop.value.is_empty() {
-            aliases.push(prop.value.clone());
-        }
-    }
-    for ext in &card.extensions {
-        let upper = ext.name.to_uppercase();
-        if upper.contains("NAME") || upper.contains("DISPLAY") {
-            let value = ext.value.to_string();
-            if !value.is_empty() {
-                aliases.push(value);
-            }
-        }
-    }
-    aliases.sort();
-    aliases.dedup();
-    aliases
 }
 
 fn date_time_property_to_string(prop: &DateTimeProperty) -> String {

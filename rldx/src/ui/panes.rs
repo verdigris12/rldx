@@ -16,15 +16,6 @@ impl DetailTab {
 
     pub const COUNT: usize = 4;
 
-    pub fn next(self) -> Self {
-        match self {
-            DetailTab::Work => DetailTab::Personal,
-            DetailTab::Personal => DetailTab::Accounts,
-            DetailTab::Accounts => DetailTab::Metadata,
-            DetailTab::Metadata => DetailTab::Work,
-        }
-    }
-
     pub fn title(self) -> &'static str {
         match self {
             DetailTab::Work => "Work",

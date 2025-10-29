@@ -8,8 +8,6 @@ pub fn normalize_query(query: &str) -> Option<String> {
 }
 
 pub fn like_pattern(normalized: &str) -> String {
-    let escaped = normalized
-        .replace('%', "\\%")
-        .replace('_', "\\_");
+    let escaped = normalized.replace('%', "\\%").replace('_', "\\_");
     format!("%{}%", escaped)
 }

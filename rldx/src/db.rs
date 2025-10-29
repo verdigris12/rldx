@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
@@ -32,7 +32,6 @@ pub struct IndexedProp {
 
 #[derive(Debug, Clone)]
 pub struct StoredItem {
-    pub uuid: String,
     pub path: PathBuf,
     pub sha1: Vec<u8>,
     pub mtime: i64,
@@ -43,21 +42,15 @@ pub struct ContactListEntry {
     pub uuid: String,
     pub display_fn: String,
     pub path: PathBuf,
-    pub has_photo: bool,
-    pub has_logo: bool,
-    pub primary_email: Option<String>,
     pub primary_org: Option<String>,
     pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ContactItem {
-    pub uuid: String,
     pub path: PathBuf,
     pub display_fn: String,
-    pub rev: Option<String>,
     pub has_photo: bool,
-    pub has_logo: bool,
     pub lang_pref: Option<String>,
 }
 
@@ -71,7 +64,6 @@ pub struct PropRow {
 
 pub struct Database {
     conn: Connection,
-    path: PathBuf,
 }
 
 impl Database {
@@ -82,10 +74,7 @@ impl Database {
         let db_path = data_dir.join("index.db");
         let conn = Connection::open(&db_path)?;
 
-        let mut db = Self {
-            conn,
-            path: db_path,
-        };
+        let mut db = Self { conn };
         db.setup()?;
         Ok(db)
     }
@@ -128,12 +117,10 @@ impl Database {
         Ok(())
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn upsert(&mut self, item: &IndexedItem, props: &[IndexedProp]) -> Result<()> {
-        let mut tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         tx.execute(
             r#"
@@ -171,7 +158,8 @@ impl Database {
             )?;
 
             for prop in props {
-                let params_json = serde_json::to_string(&prop.params).unwrap_or_else(|_| "{}".to_string());
+                let params_json =
+                    serde_json::to_string(&prop.params).unwrap_or_else(|_| "{}".to_string());
                 stmt.execute(params![
                     item.uuid,
                     item.display_fn,
@@ -188,14 +176,13 @@ impl Database {
     }
 
     pub fn stored_items(&self) -> Result<HashMap<PathBuf, StoredItem>> {
-        let mut stmt = self.conn.prepare("SELECT uuid, path, sha1, mtime FROM items")?;
+        let mut stmt = self.conn.prepare("SELECT path, sha1, mtime FROM items")?;
         let rows = stmt.query_map([], |row| {
-            let path: String = row.get(1)?;
+            let path: String = row.get(0)?;
             Ok(StoredItem {
-                uuid: row.get(0)?,
                 path: PathBuf::from(path),
-                sha1: row.get(2)?,
-                mtime: row.get(3)?,
+                sha1: row.get(1)?,
+                mtime: row.get(2)?,
             })
         })?;
 
@@ -223,16 +210,17 @@ impl Database {
         }
 
         for path in to_delete {
-            self.conn
-                .execute("DELETE FROM items WHERE path = ?1", params![path.to_string_lossy()])?;
+            self.conn.execute(
+                "DELETE FROM items WHERE path = ?1",
+                params![path.to_string_lossy()],
+            )?;
         }
         Ok(())
     }
 
     pub fn list_contacts(&self, filter: Option<&str>) -> Result<Vec<ContactListEntry>> {
         let mut sql = String::from(
-            "SELECT uuid, fn, path, has_photo, has_logo,
-                    (SELECT value FROM props p WHERE p.uuid = items.uuid AND p.field = 'EMAIL' ORDER BY seq LIMIT 1),
+            "SELECT uuid, fn, path,
                     (SELECT value FROM props p WHERE p.uuid = items.uuid AND p.field = 'ORG' ORDER BY seq LIMIT 1),
                     (SELECT value FROM props p WHERE p.uuid = items.uuid AND p.field = 'KIND' ORDER BY seq LIMIT 1)
              FROM items",
@@ -268,20 +256,17 @@ impl Database {
     }
 
     pub fn get_contact(&self, uuid: &str) -> Result<Option<ContactItem>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT uuid, path, fn, rev, has_photo, has_logo, lang_pref FROM items WHERE uuid = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, fn, has_photo, lang_pref FROM items WHERE uuid = ?1")?;
         let mut rows = stmt.query([uuid])?;
         if let Some(row) = rows.next()? {
-            let path: String = row.get(1)?;
+            let path: String = row.get(0)?;
             return Ok(Some(ContactItem {
-                uuid: row.get(0)?,
                 path: PathBuf::from(path),
-                display_fn: row.get(2)?,
-                rev: row.get(3)?,
-                has_photo: row.get::<_, i64>(4)? != 0,
-                has_logo: row.get::<_, i64>(5)? != 0,
-                lang_pref: row.get(6)?,
+                display_fn: row.get(1)?,
+                has_photo: row.get::<_, i64>(2)? != 0,
+                lang_pref: row.get(3)?,
             }));
         }
         Ok(None)
@@ -293,7 +278,8 @@ impl Database {
         )?;
         let rows = stmt.query_map([uuid], |row| {
             let raw: String = row.get(2)?;
-            let params_json: Value = serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
+            let params_json: Value =
+                serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
             Ok(PropRow {
                 field: row.get(0)?,
                 value: row.get(1)?,
@@ -316,10 +302,7 @@ fn row_to_list_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContactListEnt
         uuid: row.get(0)?,
         display_fn: row.get(1)?,
         path: PathBuf::from(path),
-        has_photo: row.get::<_, i64>(3)? != 0,
-        has_logo: row.get::<_, i64>(4)? != 0,
-        primary_email: row.get(5)?,
-        primary_org: row.get(6)?,
-        kind: row.get(7)?,
+        primary_org: row.get(3)?,
+        kind: row.get(4)?,
     })
 }

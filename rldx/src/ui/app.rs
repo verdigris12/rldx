@@ -155,10 +155,30 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
+        if self.key_matches(&key, &self.config.keys.quit)
+            && !matches!(self.focused_pane, PaneFocus::Search)
+        {
+            return Ok(true);
+        }
+
+        if self.show_search && self.key_matches(&key, &self.config.keys.confirm) {
+            self.focus_pane(PaneFocus::Card);
+            self.refresh_contacts()?;
+            return Ok(false);
+        }
+
+        if self.key_matches(&key, &self.config.keys.toggle_search) {
+            self.show_search = true;
+            self.focused_pane = PaneFocus::Search;
+            return Ok(false);
+        }
+
+        if self.key_matches(&key, &self.config.keys.tab_next) {
+            self.advance_field(1);
+            return Ok(false);
+        }
+
         match key.code {
-            KeyCode::Char('q') if !matches!(self.focused_pane, PaneFocus::Search) => {
-                return Ok(true)
-            }
             KeyCode::Esc => {
                 if self.show_search {
                     self.focus_pane(PaneFocus::Card);
@@ -168,19 +188,6 @@ impl<'a> App<'a> {
                 } else {
                     self.focus_pane(PaneFocus::Card);
                 }
-            }
-            KeyCode::Char('/') => {
-                self.show_search = true;
-                self.focused_pane = PaneFocus::Search;
-            }
-            KeyCode::Enter => {
-                if self.show_search {
-                    self.focus_pane(PaneFocus::Card);
-                    self.refresh_contacts()?;
-                }
-            }
-            KeyCode::Tab => {
-                self.advance_field(1);
             }
             KeyCode::BackTab => {
                 self.advance_field(-1);
@@ -194,24 +201,18 @@ impl<'a> App<'a> {
                 self.copy_focused_value()?;
             }
             KeyCode::Char(c) => {
-                let lower = c.to_ascii_lowercase();
                 if self.focus_by_digit(c) {
-                    // handled
-                } else {
-                    match lower {
-                        'j' => self.move_selection(1)?,
-                        'k' => self.move_selection(-1)?,
-                        'e' => {
-                            self.set_status("Editing is not yet implemented");
-                        }
-                        'i' => {
-                            self.set_status("Image fetch is not yet implemented");
-                        }
-                        'l' => {
-                            self.set_status("Language toggle not yet implemented");
-                        }
-                        _ => {}
-                    }
+                    // handled by digit shortcuts
+                } else if self.key_matches(&key, &self.config.keys.next) {
+                    self.move_selection(1)?;
+                } else if self.key_matches(&key, &self.config.keys.prev) {
+                    self.move_selection(-1)?;
+                } else if self.key_matches(&key, &self.config.keys.edit) {
+                    self.begin_edit();
+                } else if self.key_matches(&key, &self.config.keys.photo_fetch) {
+                    self.set_status("Image fetch is not yet implemented");
+                } else if self.key_matches(&key, &self.config.keys.lang_next) {
+                    self.set_status("Language toggle not yet implemented");
                 }
             }
             KeyCode::Down => self.move_selection(1)?,
@@ -420,7 +421,11 @@ impl<'a> App<'a> {
 
     fn rebuild_field_views(&mut self) {
         if self.current_contact.is_some() {
-            self.card_fields = build_card_fields(&self.current_props, &self.aliases);
+            self.card_fields = build_card_fields(
+                &self.current_props,
+                &self.aliases,
+                &self.config.fields_first_pane,
+            );
         } else {
             self.card_fields.clear();
         }
@@ -569,6 +574,45 @@ impl<'a> App<'a> {
         &self.config.ui.colors
     }
 
+    fn begin_edit(&mut self) {
+        if let Some(field) = self.focused_field() {
+            let PaneField { label, value } = field;
+            self.editor.start(&label, &value);
+            self.set_status(format!("Editing {} (read-only)", label));
+        } else {
+            self.set_status("Nothing to edit");
+        }
+    }
+
+    fn key_matches(&self, event: &KeyEvent, binding: &str) -> bool {
+        let trimmed = binding.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let disallowed = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
+        if event.modifiers.intersects(disallowed) {
+            return false;
+        }
+
+        match trimmed.to_ascii_lowercase().as_str() {
+            "enter" => matches!(event.code, KeyCode::Enter),
+            "tab" => matches!(event.code, KeyCode::Tab),
+            "backtab" | "shift+tab" => matches!(event.code, KeyCode::BackTab),
+            "backspace" => matches!(event.code, KeyCode::Backspace),
+            "esc" | "escape" => matches!(event.code, KeyCode::Esc),
+            "space" => matches!(event.code, KeyCode::Char(' ')),
+            _ => {
+                let mut chars = trimmed.chars();
+                if let (Some(first), None) = (chars.next(), chars.next()) {
+                    matches!(event.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&first))
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     fn focus_by_digit(&mut self, digit: char) -> bool {
         match digit {
             '1' => {
@@ -646,41 +690,72 @@ fn collect_languages(props: &[PropRow]) -> Vec<String> {
     langs
 }
 
-fn build_card_fields(props: &[PropRow], aliases: &[String]) -> Vec<PaneField> {
+const DEFAULT_CARD_FIELDS: &[&str] = &["fname", "mname", "lname", "alias", "phone", "email"];
+
+fn build_card_fields(props: &[PropRow], aliases: &[String], order: &[String]) -> Vec<PaneField> {
+    let fields = build_card_fields_inner(props, aliases, order.iter().map(|s| s.as_str()));
+    if fields.is_empty() {
+        build_card_fields_inner(props, aliases, DEFAULT_CARD_FIELDS.iter().copied())
+    } else {
+        fields
+    }
+}
+
+fn build_card_fields_inner<I, S>(props: &[PropRow], aliases: &[String], order: I) -> Vec<PaneField>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut fields = Vec::new();
 
-    if let Some(name_parts) = extract_name_parts(props) {
-        let NameParts {
-            family,
-            given,
-            additional,
-        } = name_parts;
-        fields.push(PaneField::new("FNAME", fallback_placeholder(given)));
-        fields.push(PaneField::new("MNAME", fallback_placeholder(additional)));
-        fields.push(PaneField::new("LNAME", fallback_placeholder(family)));
-    } else {
-        fields.push(PaneField::new("FNAME", "—"));
-        fields.push(PaneField::new("MNAME", "—"));
-        fields.push(PaneField::new("LNAME", "—"));
-    }
+    let (fname_value, mname_value, lname_value) = extract_name_parts(props)
+        .map(
+            |NameParts {
+                 family,
+                 given,
+                 additional,
+             }| {
+                (
+                    fallback_placeholder(given),
+                    fallback_placeholder(additional),
+                    fallback_placeholder(family),
+                )
+            },
+        )
+        .unwrap_or_else(|| ("—".to_string(), "—".to_string(), "—".to_string()));
 
     let alias_value = if aliases.is_empty() {
         "—".to_string()
     } else {
         aliases.join("/")
     };
-    fields.push(PaneField::new("ALIAS", alias_value));
 
-    if let Some(prop) = props.iter().find(|p| p.field == "TEL") {
-        let label = format_label_with_type("PHONE", &prop.params);
-        let value = format_with_index(&prop.value, prop.seq);
-        fields.push(PaneField::new(label, value));
-    }
+    let first_phone = props.iter().find(|p| p.field == "TEL");
+    let first_email = props.iter().find(|p| p.field == "EMAIL");
 
-    if let Some(prop) = props.iter().find(|p| p.field == "EMAIL") {
-        let label = format_label_with_type("EMAIL", &prop.params);
-        let value = format_with_index(&prop.value, prop.seq);
-        fields.push(PaneField::new(label, value));
+    for item in order {
+        let key = item.as_ref().trim().to_ascii_lowercase();
+        match key.as_str() {
+            "fname" => fields.push(PaneField::new("FNAME", fname_value.clone())),
+            "mname" => fields.push(PaneField::new("MNAME", mname_value.clone())),
+            "lname" => fields.push(PaneField::new("LNAME", lname_value.clone())),
+            "alias" => fields.push(PaneField::new("ALIAS", alias_value.clone())),
+            "phone" => {
+                if let Some(prop) = first_phone {
+                    let label = format_label_with_type("PHONE", &prop.params);
+                    let value = format_with_index(&prop.value, prop.seq);
+                    fields.push(PaneField::new(label, value));
+                }
+            }
+            "email" => {
+                if let Some(prop) = first_email {
+                    let label = format_label_with_type("EMAIL", &prop.params);
+                    let value = format_with_index(&prop.value, prop.seq);
+                    fields.push(PaneField::new(label, value));
+                }
+            }
+            _ => {}
+        }
     }
 
     fields

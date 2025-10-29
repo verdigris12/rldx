@@ -2,7 +2,6 @@ mod config;
 mod db;
 mod import;
 mod indexer;
-mod photo;
 mod search;
 mod ui;
 mod vcard_io;

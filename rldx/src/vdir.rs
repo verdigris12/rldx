@@ -11,25 +11,14 @@ use crate::vcard_io::{self, CardWithSource};
 
 const NORMALIZED_MARKER: &str = ".rldx_normalized";
 
-#[derive(Debug, Clone)]
-pub struct NormalizedCard {
-    pub uuid: Uuid,
-    pub path: PathBuf,
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct NormalizationReport {
-    pub cards: Vec<NormalizedCard>,
     pub needs_upgrade: Vec<PathBuf>,
     pub marker_created: bool,
 }
 
 pub fn marker_path(vdir: &Path) -> PathBuf {
     vdir.join(NORMALIZED_MARKER)
-}
-
-pub fn is_normalized(vdir: &Path) -> bool {
-    marker_path(vdir).exists()
 }
 
 pub fn normalize(vdir: &Path) -> Result<NormalizationReport> {
@@ -133,11 +122,6 @@ fn process_cards(
         let bytes = vcard_io::card_to_bytes(&card);
         write_atomic(&target, &bytes)?;
         wrote_any = true;
-
-        report.cards.push(NormalizedCard {
-            uuid,
-            path: target.clone(),
-        });
 
         if target != *original_path {
             wrote_to_different_path = true;
@@ -258,28 +242,29 @@ pub fn write_atomic(target: &Path, data: &[u8]) -> Result<()> {
     fs::create_dir_all(parent)
         .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
 
-    let mut temp_path = PathBuf::new();
-    let mut counter: u32 = 0;
-    loop {
-        let candidate = if counter == 0 {
-            target
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| format!(".{name}.tmp"))
-                .unwrap_or_else(|| ".rldx.tmp".to_string())
-        } else {
-            target
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| format!(".{name}.{counter}.tmp"))
-                .unwrap_or_else(|| format!(".rldx.{counter}.tmp"))
-        };
-        temp_path = parent.join(candidate);
-        if !temp_path.exists() {
-            break;
+    let temp_path = {
+        let mut counter: u32 = 0;
+        loop {
+            let candidate = if counter == 0 {
+                target
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| format!(".{name}.tmp"))
+                    .unwrap_or_else(|| ".rldx.tmp".to_string())
+            } else {
+                target
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| format!(".{name}.{counter}.tmp"))
+                    .unwrap_or_else(|| format!(".rldx.{counter}.tmp"))
+            };
+            let candidate_path = parent.join(candidate);
+            if !candidate_path.exists() {
+                break candidate_path;
+            }
+            counter += 1;
         }
-        counter += 1;
-    }
+    };
 
     {
         use std::fs::OpenOptions;
