@@ -593,6 +593,25 @@ impl<'a> App<'a> {
         &self.config.ui.colors
     }
 
+    pub fn image_pane_width(&self) -> u16 {
+        self.config.ui.pane.image.width
+    }
+
+    pub fn contact_path_display(&self, path: &Path) -> String {
+        let relative = path.strip_prefix(&self.config.vdir).unwrap_or(path);
+
+        let mut text = relative.to_string_lossy().to_string();
+        if text.is_empty() {
+            text = path.to_string_lossy().to_string();
+        }
+
+        if std::path::MAIN_SEPARATOR != '/' {
+            text = text.replace(std::path::MAIN_SEPARATOR, "/");
+        }
+
+        text.to_uppercase()
+    }
+
     fn begin_edit(&mut self) {
         if let Some(field) = self.focused_field() {
             let PaneField { label, value, .. } = field;

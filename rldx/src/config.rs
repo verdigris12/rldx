@@ -24,6 +24,7 @@ pub struct Config {
 pub struct UiConfig {
     pub colors: UiColors,
     pub icons: UiIcons,
+    pub pane: UiPane,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,16 @@ pub struct UiIcons {
     pub address_book: String,
     pub contact: String,
     pub organization: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiPane {
+    pub image: UiPaneImage,
+}
+
+#[derive(Debug, Clone)]
+pub struct UiPaneImage {
+    pub width: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -241,7 +252,11 @@ fn warn_unknown_ui_keys(value: &toml::Value) {
         return;
     };
 
-    let known = HashSet::from(["colors".to_string(), "icons".to_string()]);
+    let known = HashSet::from([
+        "colors".to_string(),
+        "icons".to_string(),
+        "pane".to_string(),
+    ]);
 
     for key in table.keys() {
         if !known.contains(key) {
@@ -254,6 +269,9 @@ fn warn_unknown_ui_keys(value: &toml::Value) {
     }
     if let Some(icons_val) = table.get("icons") {
         warn_unknown_ui_icons(icons_val);
+    }
+    if let Some(pane_val) = table.get("pane") {
+        warn_unknown_ui_pane(pane_val);
     }
 }
 
@@ -292,6 +310,34 @@ fn warn_unknown_ui_icons(value: &toml::Value) {
     }
 }
 
+fn warn_unknown_ui_pane(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from(["image".to_string()]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown ui.pane entry `{}`", key);
+        }
+    }
+
+    if let Some(image_val) = table.get("image") {
+        warn_unknown_ui_pane_image(image_val);
+    }
+}
+
+fn warn_unknown_ui_pane_image(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from(["width".to_string()]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown ui.pane.image entry `{}`", key);
+        }
+    }
+}
+
 fn warn_unknown_commands_keys(value: &toml::Value) {
     let Some(table) = value.as_table() else {
         return;
@@ -309,6 +355,7 @@ fn warn_unknown_commands_keys(value: &toml::Value) {
 struct UiFile {
     colors: UiColorsFile,
     icons: UiIconsFile,
+    pane: UiPaneFile,
 }
 
 impl Default for UiFile {
@@ -316,6 +363,7 @@ impl Default for UiFile {
         Self {
             colors: UiColorsFile::default(),
             icons: UiIconsFile::default(),
+            pane: UiPaneFile::default(),
         }
     }
 }
@@ -362,8 +410,39 @@ impl Default for UiIconsFile {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct UiPaneFile {
+    image: UiPaneImageFile,
+}
+
+impl Default for UiPaneFile {
+    fn default() -> Self {
+        Self {
+            image: UiPaneImageFile::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct UiPaneImageFile {
+    width: u16,
+}
+
+impl Default for UiPaneImageFile {
+    fn default() -> Self {
+        Self { width: 40 }
+    }
+}
+
 impl From<UiFile> for UiConfig {
     fn from(file: UiFile) -> Self {
+        let image_width = if file.pane.image.width == 0 {
+            40
+        } else {
+            file.pane.image.width
+        };
         Self {
             colors: UiColors {
                 border: file.colors.border,
@@ -377,6 +456,11 @@ impl From<UiFile> for UiConfig {
                 address_book: file.icons.address_book,
                 contact: file.icons.contact,
                 organization: file.icons.organization,
+            },
+            pane: UiPane {
+                image: UiPaneImage {
+                    width: image_width,
+                },
             },
         }
     }

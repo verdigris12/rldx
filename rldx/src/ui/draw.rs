@@ -37,10 +37,8 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut spans: Vec<Span> = Vec::new();
 
     if let Some(contact) = &app.current_contact {
-        spans.push(Span::styled(
-            format!("VDIR://{}", contact.path.to_string_lossy()),
-            header_style,
-        ));
+        let display_path = app.contact_path_display(&contact.path);
+        spans.push(Span::styled(format!("VDIR://{}", display_path), header_style));
 
         if !app.languages.is_empty() {
             spans.push(Span::raw("   "));
@@ -90,9 +88,10 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(area);
 
+    let image_width = app.image_pane_width();
     let upper = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .constraints([Constraint::Min(0), Constraint::Length(image_width)])
         .split(vertical[0]);
 
     draw_main_card(frame, upper[0], app);

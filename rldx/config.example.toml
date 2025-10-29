@@ -18,6 +18,10 @@ address_book = "@"
 contact = "👤 "
 organization = "🏢 "
 
+[ui.pane.image]
+# Width of the image pane in characters.
+width = 30
+
 [commands]
 # Program that receives copied values on stdin.
 copy = ["wl-copy"]
