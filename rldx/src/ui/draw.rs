@@ -3,7 +3,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::config::RgbColor;
@@ -246,21 +246,15 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let message = app.status.as_deref().unwrap_or("READY");
     let colors = app.ui_colors();
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_type(BorderType::Double)
-        .border_style(border_style(app, false));
     let style = Style::default()
         .fg(color(colors.status_fg))
         .bg(color(colors.status_bg))
         .add_modifier(Modifier::BOLD);
 
-    frame.render_widget(
-        Paragraph::new(message.to_string())
-            .style(style)
-            .block(block),
-        area,
-    );
+    let background = Block::default().style(Style::default().bg(color(colors.status_bg)));
+    frame.render_widget(background, area);
+
+    frame.render_widget(Paragraph::new(message.to_string()).style(style), area);
 }
 
 fn build_tab_header(app: &App) -> Line<'static> {
