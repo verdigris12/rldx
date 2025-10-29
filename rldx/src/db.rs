@@ -47,6 +47,7 @@ pub struct ContactListEntry {
     pub has_logo: bool,
     pub primary_email: Option<String>,
     pub primary_org: Option<String>,
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -232,7 +233,8 @@ impl Database {
         let mut sql = String::from(
             "SELECT uuid, fn, path, has_photo, has_logo,
                     (SELECT value FROM props p WHERE p.uuid = items.uuid AND p.field = 'EMAIL' ORDER BY seq LIMIT 1),
-                    (SELECT value FROM props p WHERE p.uuid = items.uuid AND p.field = 'ORG' ORDER BY seq LIMIT 1)
+                    (SELECT value FROM props p WHERE p.uuid = items.uuid AND p.field = 'ORG' ORDER BY seq LIMIT 1),
+                    (SELECT value FROM props p WHERE p.uuid = items.uuid AND p.field = 'KIND' ORDER BY seq LIMIT 1)
              FROM items",
         );
 
@@ -318,5 +320,6 @@ fn row_to_list_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContactListEnt
         has_logo: row.get::<_, i64>(4)? != 0,
         primary_email: row.get(5)?,
         primary_org: row.get(6)?,
+        kind: row.get(7)?,
     })
 }

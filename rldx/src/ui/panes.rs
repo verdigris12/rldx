@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DetailTab {
     Work,
     Personal,
@@ -7,6 +7,15 @@ pub enum DetailTab {
 }
 
 impl DetailTab {
+    pub const ALL: [DetailTab; 4] = [
+        DetailTab::Work,
+        DetailTab::Personal,
+        DetailTab::Accounts,
+        DetailTab::Metadata,
+    ];
+
+    pub const COUNT: usize = 4;
+
     pub fn next(self) -> Self {
         match self {
             DetailTab::Work => DetailTab::Personal,
@@ -22,6 +31,34 @@ impl DetailTab {
             DetailTab::Personal => "Personal",
             DetailTab::Accounts => "Accounts",
             DetailTab::Metadata => "Full Metadata",
+        }
+    }
+
+    pub fn digit(self) -> char {
+        match self {
+            DetailTab::Work => '2',
+            DetailTab::Personal => '3',
+            DetailTab::Accounts => '4',
+            DetailTab::Metadata => '5',
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            DetailTab::Work => 0,
+            DetailTab::Personal => 1,
+            DetailTab::Accounts => 2,
+            DetailTab::Metadata => 3,
+        }
+    }
+
+    pub fn from_digit(digit: char) -> Option<Self> {
+        match digit {
+            '2' => Some(DetailTab::Work),
+            '3' => Some(DetailTab::Personal),
+            '4' => Some(DetailTab::Accounts),
+            '5' => Some(DetailTab::Metadata),
+            _ => None,
         }
     }
 }
