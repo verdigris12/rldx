@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
@@ -248,8 +248,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let colors = app.ui_colors();
     let style = Style::default()
         .fg(color(colors.status_fg))
-        .bg(color(colors.status_bg))
-        .add_modifier(Modifier::BOLD);
+        .bg(color(colors.status_bg));
 
     let background = Block::default().style(Style::default().bg(color(colors.status_bg)));
     frame.render_widget(background, area);
@@ -288,10 +287,7 @@ fn line_styles(app: &App, highlight: bool) -> (Style, Style) {
         let style = selection_style(app);
         (style, style)
     } else {
-        (
-            Style::default().add_modifier(Modifier::BOLD),
-            Style::default(),
-        )
+        (header_text_style(app), Style::default())
     }
 }
 
@@ -322,30 +318,26 @@ fn selection_style(app: &App) -> Style {
     Style::default()
         .fg(color(colors.selection_fg))
         .bg(color(colors.selection_bg))
-        .add_modifier(Modifier::BOLD)
 }
 
 fn border_style(app: &App, active: bool) -> Style {
     let colors = app.ui_colors();
-    let mut style = Style::default().fg(color(colors.border));
-    if active {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    style
+    let fg = if active {
+        colors.selection_fg
+    } else {
+        colors.border
+    };
+    Style::default().fg(color(fg))
 }
 
 fn header_text_style(app: &App) -> Style {
     let colors = app.ui_colors();
-    Style::default()
-        .fg(color(colors.separator))
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(color(colors.separator))
 }
 
 fn separator_style(app: &App) -> Style {
     let colors = app.ui_colors();
-    Style::default()
-        .fg(color(colors.separator))
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(color(colors.separator))
 }
 
 fn render_header_with_double_line(
