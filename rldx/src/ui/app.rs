@@ -1,9 +1,9 @@
-use std::io::{stdout, Write};
+use std::io::{stdout, Cursor, Write};
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -13,12 +13,17 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use serde_json::Value;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+
 use crate::config::{CommandExec, Config, UiColors};
 use crate::db::{ContactItem, ContactListEntry, Database, PropRow};
 use crate::indexer;
 use crate::search;
 use crate::vcard_io;
 use crate::vdir;
+
+use image::{self, ImageFormat};
 
 use super::draw;
 use super::edit::{FieldRef, InlineEditor};
@@ -124,6 +129,8 @@ pub struct App<'a> {
     pub tab_field_indices: [usize; DetailTab::COUNT],
     pub search_rows: Vec<SearchRow>,
     pub selected_row: Option<usize>,
+    pub photo_data: Option<PhotoData>,
+    pub photo_error: Option<String>,
 }
 
 impl<'a> App<'a> {
@@ -150,6 +157,8 @@ impl<'a> App<'a> {
             tab_field_indices: [0; DetailTab::COUNT],
             search_rows: Vec::new(),
             selected_row: None,
+            photo_data: None,
+            photo_error: None,
         };
         app.rebuild_search_rows();
         app.load_selection()?;
@@ -321,8 +330,7 @@ impl<'a> App<'a> {
                 self.editor.value.pop();
             }
             KeyCode::Char(c) => {
-                let disallowed =
-                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
+                let disallowed = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
                 if !key.modifiers.intersects(disallowed) {
                     self.editor.value.push(c);
                 }
@@ -494,6 +502,8 @@ impl<'a> App<'a> {
             self.current_props.clear();
             self.aliases.clear();
             self.languages.clear();
+            self.photo_data = None;
+            self.photo_error = None;
             self.rebuild_field_views();
             return Ok(());
         }
@@ -503,6 +513,16 @@ impl<'a> App<'a> {
         self.current_props = self.db.get_props(&contact.uuid)?;
         self.aliases = collect_aliases(&self.current_props, &contact.display_fn);
         self.languages = collect_languages(&self.current_props);
+        match decode_embedded_photo(&self.current_props) {
+            Ok(photo) => {
+                self.photo_error = None;
+                self.photo_data = photo;
+            }
+            Err(err) => {
+                self.photo_error = Some(err.to_string());
+                self.photo_data = None;
+            }
+        }
         self.rebuild_field_views();
         Ok(())
     }
@@ -673,6 +693,14 @@ impl<'a> App<'a> {
         self.config.ui.pane.image.height
     }
 
+    pub fn embedded_photo(&self) -> Option<&PhotoData> {
+        self.photo_data.as_ref()
+    }
+
+    pub fn photo_error(&self) -> Option<&str> {
+        self.photo_error.as_deref()
+    }
+
     pub fn contact_path_display(&self, path: &Path) -> String {
         let relative = path.strip_prefix(&self.config.vdir).unwrap_or(path);
 
@@ -691,8 +719,7 @@ impl<'a> App<'a> {
     fn begin_edit(&mut self) {
         if let Some(field) = self.focused_field() {
             if let Some(source) = field.source() {
-                self.editor
-                    .start(&field.label, field.copy_text(), source);
+                self.editor.start(&field.label, field.copy_text(), source);
                 self.set_status(format!("Editing {}", field.label));
             } else {
                 self.set_status("Field not editable");
@@ -855,6 +882,134 @@ fn collect_languages(props: &[PropRow]) -> Vec<String> {
     langs
 }
 
+#[derive(Debug, Clone)]
+pub struct PhotoData {
+    base64_png: String,
+    width: u32,
+    height: u32,
+}
+
+impl PhotoData {
+    pub fn png_base64(&self) -> &str {
+        &self.base64_png
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+fn decode_embedded_photo(props: &[PropRow]) -> Result<Option<PhotoData>> {
+    for prop in props.iter().filter(|p| p.field == "PHOTO") {
+        match decode_photo_prop(prop) {
+            Ok(Some(photo)) => return Ok(Some(photo)),
+            Ok(None) => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(None)
+}
+
+fn decode_photo_prop(prop: &PropRow) -> Result<Option<PhotoData>> {
+    if prop
+        .params
+        .get("value")
+        .and_then(Value::as_str)
+        .map(|value| value.eq_ignore_ascii_case("uri"))
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+
+    if prop.value.trim().is_empty() {
+        return Ok(None);
+    }
+
+    if prop
+        .value
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("http://")
+        || prop
+            .value
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("https://")
+    {
+        return Ok(None);
+    }
+
+    let data = if let Some(data_uri) = prop.value.trim().strip_prefix("data:") {
+        parse_data_uri(data_uri)?
+    } else {
+        decode_base64_blob(&prop.value)?
+    };
+
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    let image = image::load_from_memory(&data)
+        .with_context(|| "unable to parse embedded photo data as image")?;
+    let (width, height) = (image.width(), image.height());
+    let mut png_bytes: Vec<u8> = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .with_context(|| "failed to convert embedded photo to PNG")?;
+    let base64_png = BASE64_STANDARD.encode(png_bytes);
+
+    Ok(Some(PhotoData {
+        base64_png,
+        width,
+        height,
+    }))
+}
+
+fn parse_data_uri(input: &str) -> Result<Vec<u8>> {
+    let mut parts = input.splitn(2, ',');
+    let meta = parts
+        .next()
+        .ok_or_else(|| anyhow!("invalid data URI in PHOTO value"))?;
+    let data = parts
+        .next()
+        .ok_or_else(|| anyhow!("data URI is missing payload"))?;
+
+    let mut is_base64 = false;
+
+    for segment in meta.split(';') {
+        if segment.is_empty() {
+            continue;
+        }
+        if segment.eq_ignore_ascii_case("base64") {
+            is_base64 = true;
+        }
+    }
+
+    if !is_base64 {
+        bail!("embedded data URI is not base64 encoded");
+    }
+
+    let decoded = BASE64_STANDARD
+        .decode(data.trim())
+        .with_context(|| "failed to decode base64 data URI contents")?;
+    Ok(decoded)
+}
+
+fn decode_base64_blob(value: &str) -> Result<Vec<u8>> {
+    let filtered: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    if filtered.is_empty() {
+        return Ok(Vec::new());
+    }
+    let decoded = BASE64_STANDARD
+        .decode(filtered)
+        .with_context(|| "failed to decode embedded PHOTO data as base64")?;
+    Ok(decoded)
+}
+
 const DEFAULT_CARD_FIELDS: &[&str] = &["fname", "mname", "lname", "alias", "phone", "email"];
 
 fn build_card_fields(
@@ -924,7 +1079,8 @@ where
                 if !handled_name {
                     handled_name = true;
                     if let Some(prop) = props.iter().find(|p| p.field == "N") {
-                        for (idx, component) in name_components(&prop.value).into_iter().enumerate() {
+                        for (idx, component) in name_components(&prop.value).into_iter().enumerate()
+                        {
                             let display_component = if component.is_empty() {
                                 "—".to_string()
                             } else {
@@ -955,7 +1111,8 @@ where
                 if !handled_name {
                     handled_name = true;
                     if let Some(prop) = props.iter().find(|p| p.field == "N") {
-                        for (idx, component) in name_components(&prop.value).into_iter().enumerate() {
+                        for (idx, component) in name_components(&prop.value).into_iter().enumerate()
+                        {
                             let display_component = if component.is_empty() {
                                 "—".to_string()
                             } else {
@@ -1030,7 +1187,11 @@ where
     fields
 }
 
-fn build_tab_fields(tab: DetailTab, props: &[PropRow], default_region: Option<&str>) -> Vec<PaneField> {
+fn build_tab_fields(
+    tab: DetailTab,
+    props: &[PropRow],
+    default_region: Option<&str>,
+) -> Vec<PaneField> {
     match tab {
         DetailTab::Work => build_work_fields(props, default_region),
         DetailTab::Personal => build_personal_fields(props, default_region),
@@ -1064,7 +1225,9 @@ fn build_work_fields(props: &[PropRow], default_region: Option<&str>) -> Vec<Pan
             let label = format_label_with_type("EMAIL", &prop.params);
             let base = prop.value.trim().to_string();
             let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(label, display, base, "EMAIL", prop.seq, None));
+            fields.push(PaneField::from_prop(
+                label, display, base, "EMAIL", prop.seq, None,
+            ));
         }
     }
 
@@ -1073,7 +1236,9 @@ fn build_work_fields(props: &[PropRow], default_region: Option<&str>) -> Vec<Pan
             let label = format_label_with_type("PHONE", &prop.params);
             let base = vcard_io::phone_display_value(&prop.value, default_region);
             let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(label, display, base, "TEL", prop.seq, None));
+            fields.push(PaneField::from_prop(
+                label, display, base, "TEL", prop.seq, None,
+            ));
         }
     }
 
@@ -1102,7 +1267,9 @@ fn build_personal_fields(props: &[PropRow], default_region: Option<&str>) -> Vec
             let label = format_label_with_type("EMAIL", &prop.params);
             let base = prop.value.trim().to_string();
             let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(label, display, base, "EMAIL", prop.seq, None));
+            fields.push(PaneField::from_prop(
+                label, display, base, "EMAIL", prop.seq, None,
+            ));
         }
     }
 
@@ -1111,7 +1278,9 @@ fn build_personal_fields(props: &[PropRow], default_region: Option<&str>) -> Vec
             let label = format_label_with_type("PHONE", &prop.params);
             let base = vcard_io::phone_display_value(&prop.value, default_region);
             let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(label, display, base, "TEL", prop.seq, None));
+            fields.push(PaneField::from_prop(
+                label, display, base, "TEL", prop.seq, None,
+            ));
         }
     }
 

@@ -392,8 +392,11 @@ fn update_fn_value(card: &mut Vcard, seq: i64, new_value: &str) -> bool {
 
     let trimmed = new_value.trim().to_string();
     if card.formatted_name.len() <= idx {
-        card.formatted_name
-            .resize_with(idx + 1, || TextProperty { group: None, value: String::new(), parameters: None });
+        card.formatted_name.resize_with(idx + 1, || TextProperty {
+            group: None,
+            value: String::new(),
+            parameters: None,
+        });
     }
 
     if let Some(prop) = card.formatted_name.get_mut(idx) {

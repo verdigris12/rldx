@@ -1,14 +1,18 @@
+use std::env;
+
 use anyhow::Result;
 use ratatui::backend::Backend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::config::RgbColor;
 
-use super::app::{App, PaneField, PaneFocus, SearchRow};
+use super::app::{App, PaneField, PaneFocus, PhotoData, SearchRow};
 use super::panes::DetailTab;
 
 pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> Result<()> {
@@ -42,7 +46,10 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     if let Some(contact) = &app.current_contact {
         let display_path = app.contact_path_display(&contact.path);
-        spans.push(Span::styled(format!("VDIR://{}", display_path), header_style));
+        spans.push(Span::styled(
+            format!("VDIR://{}", display_path),
+            header_style,
+        ));
 
         if !app.languages.is_empty() {
             spans.push(Span::raw("   "));
@@ -87,35 +94,65 @@ fn draw_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(area);
+    let image_height = app.image_pane_height().min(area.height);
+    let upper_height = image_height.min(area.height);
+
+    let main_height = upper_height.min(area.height);
+    let lower_start = area.y + upper_height;
+
+    let top_rect = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: upper_height,
+    };
+
+    let lower_rect = Rect {
+        x: area.x,
+        y: lower_start,
+        width: area.width,
+        height: area.height.saturating_sub(upper_height),
+    };
 
     let image_width = app.image_pane_width();
     let upper = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(image_width)])
-        .split(vertical[0]);
+        .split(top_rect);
 
-    draw_main_card(frame, upper[0], app);
-
+    let mut main_area = upper[0];
     let mut image_area = upper[1];
-    let desired_height = app.image_pane_height();
-    if image_area.height > desired_height {
-        image_area.height = desired_height;
-    }
-    draw_image(frame, image_area, app);
-    if upper[1].height > image_area.height {
+    let original_main_area = main_area;
+    let original_image_area = image_area;
+
+    main_area.height = main_height.min(main_area.height);
+    image_area.height = main_height.min(image_area.height);
+
+    draw_main_card(frame, main_area, app);
+    if original_main_area.height > main_area.height {
         let clear_rect = Rect {
-            x: upper[1].x,
-            y: upper[1].y + image_area.height,
-            width: upper[1].width,
-            height: upper[1].height - image_area.height,
+            x: original_main_area.x,
+            y: original_main_area.y + main_area.height,
+            width: original_main_area.width,
+            height: original_main_area.height - main_area.height,
         };
         frame.render_widget(Clear, clear_rect);
     }
-    draw_tabs(frame, vertical[1], app);
+
+    draw_image(frame, image_area, app);
+    if original_image_area.height > image_area.height {
+        let clear_rect = Rect {
+            x: original_image_area.x,
+            y: original_image_area.y + image_area.height,
+            width: original_image_area.width,
+            height: original_image_area.height - image_area.height,
+        };
+        frame.render_widget(Clear, clear_rect);
+    }
+
+    if lower_rect.height > 0 {
+        draw_tabs(frame, lower_rect, app);
+    }
 }
 
 fn draw_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -209,21 +246,44 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_image(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let text = if let Some(contact) = &app.current_contact {
-        if contact.has_photo {
-            "Image rendering not implemented"
-        } else {
-            "NO IMAGE AVAILABLE"
-        }
-    } else {
-        ""
-    };
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(app, false))
         .title("Image");
-    frame.render_widget(Paragraph::new(text).block(block), area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Clear, inner);
+    frame.render_widget(KittyClear, inner);
+
+    if let Some(photo) = app.embedded_photo() {
+        if supports_kitty_graphics() {
+            frame.render_widget(KittyImage::new(photo), inner);
+        } else {
+            render_centered_words(frame, inner, "KITTY GRAPHICS NOT AVAILABLE");
+        }
+        return;
+    }
+
+    let message = if let Some(error) = app.photo_error() {
+        error.to_string()
+    } else if let Some(contact) = &app.current_contact {
+        if contact.has_photo {
+            "PHOTO NOT EMBEDDED".to_string()
+        } else {
+            "NO IMAGE AVAILABLE".to_string()
+        }
+    } else {
+        String::new()
+    };
+
+    if !message.is_empty() {
+        render_centered_words(frame, inner, &message);
+    }
 }
 
 fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -359,6 +419,113 @@ fn separator_style(app: &App) -> Style {
     Style::default().fg(color(colors.separator))
 }
 
+fn render_centered_words(frame: &mut Frame<'_>, area: Rect, text: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = text
+        .split_whitespace()
+        .map(|word| Line::from(word.to_string()))
+        .collect();
+
+    if lines.is_empty() {
+        return;
+    }
+
+    if lines.len() as u16 > area.height {
+        lines.truncate(area.height as usize);
+    }
+
+    let height = lines.len() as u16;
+    let start_y = area.y + (area.height.saturating_sub(height)) / 2;
+    let target = Rect {
+        x: area.x,
+        y: start_y,
+        width: area.width,
+        height,
+    };
+
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), target);
+}
+
+struct KittyImage<'a> {
+    photo: &'a PhotoData,
+}
+
+impl<'a> KittyImage<'a> {
+    fn new(photo: &'a PhotoData) -> Self {
+        Self { photo }
+    }
+}
+
+impl<'a> Widget for KittyImage<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let (cols, rows) = fit_image_to_area(self.photo, area.width, area.height);
+        let origin_x = area.x + (area.width.saturating_sub(cols)) / 2;
+        let origin_y = area.y + (area.height.saturating_sub(rows)) / 2;
+        let sequence = kitty_sequence(self.photo, cols, rows);
+        buf.get_mut(origin_x, origin_y).set_symbol(&sequence);
+    }
+}
+
+fn kitty_sequence(photo: &PhotoData, width: u16, height: u16) -> String {
+    format!(
+        "\x1b_Ga=T,f=100,q=2,s={width},v={height};{}\x1b\\",
+        photo.png_base64()
+    )
+}
+
+fn supports_kitty_graphics() -> bool {
+    if env::var("KITTY_WINDOW_ID").is_ok() {
+        return true;
+    }
+    if let Ok(term) = env::var("TERM") {
+        if term.to_ascii_lowercase().contains("kitty") {
+            return true;
+        }
+    }
+    false
+}
+
+fn fit_image_to_area(photo: &PhotoData, area_width: u16, area_height: u16) -> (u16, u16) {
+    let img_w = photo.width().max(1);
+    let img_h = photo.height().max(1);
+    let max_w = area_width.max(1);
+    let max_h = area_height.max(1);
+
+    let mut cells_w = max_w;
+    let mut cells_h = ((cells_w as u32 * img_h + img_w - 1) / img_w).clamp(1, max_h as u32) as u16;
+
+    if cells_h > max_h {
+        cells_h = max_h;
+        cells_w = ((cells_h as u32 * img_w + img_h - 1) / img_h).clamp(1, max_w as u32) as u16;
+        if cells_w == 0 {
+            cells_w = 1;
+        }
+    }
+
+    cells_w = cells_w.max(1);
+    cells_h = cells_h.max(1);
+    (cells_w, cells_h)
+}
+
+struct KittyClear;
+
+impl Widget for KittyClear {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        buf.get_mut(area.x, area.y).set_symbol("\x1b_Ga=d\x1b\\");
+    }
+}
+
 fn draw_editor_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let width = area.width.min(60);
     let height = area.height.min(7);
@@ -366,9 +533,7 @@ fn draw_editor_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     frame.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("EDIT FIELD");
+    let block = Block::default().borders(Borders::ALL).title("EDIT FIELD");
     frame.render_widget(block.clone(), popup);
 
     let inner = block.inner(popup);
