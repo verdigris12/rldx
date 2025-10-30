@@ -719,7 +719,7 @@ impl<'a> App<'a> {
     fn begin_edit(&mut self) {
         if let Some(field) = self.focused_field() {
             if let Some(source) = field.source() {
-                self.editor.start(&field.label, field.copy_text(), source);
+                self.editor.start(field.copy_text(), source);
                 self.set_status(format!("Editing {}", field.label));
             } else {
                 self.set_status("Field not editable");

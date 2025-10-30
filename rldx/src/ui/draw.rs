@@ -34,10 +34,6 @@ fn draw_frame(frame: &mut Frame<'_>, app: &App) {
     draw_header(frame, layout[0], app);
     draw_body(frame, layout[1], app);
     draw_footer(frame, layout[2], app);
-
-    if app.editor.active {
-        draw_editor_overlay(frame, size, app);
-    }
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -360,9 +356,16 @@ fn field_line(app: &App, field: &PaneField, highlight: bool) -> Line<'static> {
             .unwrap_or(false);
     let (label_style, value_style) = line_styles(app, highlight || editing);
     let label = format!("{}: ", field.label);
+    let value = if editing {
+        let mut text = app.editor.value.clone();
+        text.push('_');
+        text
+    } else {
+        field.value.clone()
+    };
     Line::from(vec![
         Span::styled(label, label_style),
-        Span::styled(field.value.clone(), value_style),
+        Span::styled(value, value_style),
     ])
 }
 
@@ -523,47 +526,6 @@ impl Widget for KittyClear {
         }
 
         buf.get_mut(area.x, area.y).set_symbol("\x1b_Ga=d\x1b\\");
-    }
-}
-
-fn draw_editor_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let width = area.width.min(60);
-    let height = area.height.min(7);
-    let popup = centered_rect(width, height, area);
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default().borders(Borders::ALL).title("EDIT FIELD");
-    frame.render_widget(block.clone(), popup);
-
-    let inner = block.inner(popup);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let label = app.editor.label().unwrap_or("FIELD");
-    let mut value = app.editor.value.clone();
-    value.push('_');
-
-    let lines = vec![
-        Line::from(label.to_string()),
-        Line::from(value),
-        Line::from("Enter=Save   Esc=Cancel"),
-    ];
-
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let clamped_width = width.min(area.width);
-    let clamped_height = height.min(area.height);
-    let x = area.x + (area.width.saturating_sub(clamped_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(clamped_height)) / 2;
-    Rect {
-        x,
-        y,
-        width: clamped_width,
-        height: clamped_height,
     }
 }
 

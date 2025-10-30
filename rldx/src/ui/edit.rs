@@ -26,28 +26,21 @@ impl FieldRef {
 #[derive(Default)]
 pub struct InlineEditor {
     pub active: bool,
-    label: Option<String>,
     target: Option<FieldRef>,
     pub value: String,
 }
 
 impl InlineEditor {
-    pub fn start(&mut self, label: &str, current: &str, target: FieldRef) {
+    pub fn start(&mut self, current: &str, target: FieldRef) {
         self.active = true;
-        self.label = Some(label.to_string());
         self.target = Some(target);
         self.value = current.to_string();
     }
 
     pub fn cancel(&mut self) {
         self.active = false;
-        self.label = None;
         self.target = None;
         self.value.clear();
-    }
-
-    pub fn label(&self) -> Option<&str> {
-        self.label.as_deref()
     }
 
     pub fn target(&self) -> Option<&FieldRef> {
