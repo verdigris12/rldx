@@ -23,7 +23,9 @@ organization = "🏢 "
 
 [ui.pane.image]
 # Width of the image pane in characters.
-width = 30
+width = 40
+# Height of the image pane in rows.
+height = 12
 
 [commands]
 # Program that receives copied values on stdin.

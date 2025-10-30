@@ -15,11 +15,13 @@ use serde_json::Value;
 
 use crate::config::{CommandExec, Config, UiColors};
 use crate::db::{ContactItem, ContactListEntry, Database, PropRow};
+use crate::indexer;
 use crate::search;
 use crate::vcard_io;
+use crate::vdir;
 
 use super::draw;
-use super::edit::InlineEditor;
+use super::edit::{FieldRef, InlineEditor};
 use super::panes::DetailTab;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,32 +29,55 @@ pub struct PaneField {
     pub label: String,
     pub value: String,
     pub copy_value: String,
+    pub source: Option<FieldRef>,
 }
 
 impl PaneField {
     fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
-        let value = value.into();
-        Self {
-            label: label.into(),
-            copy_value: value.clone(),
-            value,
-        }
+        Self::with_source(label, value, None, None)
     }
 
-    fn with_copy_value(
+    fn from_prop(
         label: impl Into<String>,
         value: impl Into<String>,
         copy_value: impl Into<String>,
+        field: &str,
+        seq: i64,
+        component: Option<usize>,
     ) -> Self {
+        Self::with_source(
+            label,
+            value,
+            Some(copy_value.into()),
+            Some(match component {
+                Some(index) => FieldRef::with_component(field.to_string(), seq, index),
+                None => FieldRef::new(field.to_string(), seq),
+            }),
+        )
+    }
+
+    fn with_source(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        copy_value: Option<String>,
+        source: Option<FieldRef>,
+    ) -> Self {
+        let value = value.into();
+        let copy_value = copy_value.unwrap_or_else(|| value.clone());
         Self {
             label: label.into(),
-            value: value.into(),
-            copy_value: copy_value.into(),
+            value,
+            copy_value,
+            source,
         }
     }
 
-    fn copy_text(&self) -> &str {
+    pub fn copy_text(&self) -> &str {
         &self.copy_value
+    }
+
+    pub fn source(&self) -> Option<FieldRef> {
+        self.source.clone()
     }
 }
 
@@ -79,7 +104,7 @@ pub enum PaneFocus {
 }
 
 pub struct App<'a> {
-    db: &'a Database,
+    db: &'a mut Database,
     config: &'a Config,
     pub contacts: Vec<ContactListEntry>,
     pub selected: usize,
@@ -102,7 +127,7 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    pub fn new(db: &'a Database, config: &'a Config) -> Result<Self> {
+    pub fn new(db: &'a mut Database, config: &'a Config) -> Result<Self> {
         let contacts = db.list_contacts(None)?;
         let mut app = Self {
             db,
@@ -171,6 +196,12 @@ impl<'a> App<'a> {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.editor.active {
+            if self.handle_editor_key(key)? {
+                return Ok(false);
+            }
+        }
+
         if self.show_search && self.handle_search_key(key)? {
             return Ok(false);
         }
@@ -262,6 +293,43 @@ impl<'a> App<'a> {
             }
             _ => return Ok(false),
         }
+        Ok(true)
+    }
+
+    fn handle_editor_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if !self.editor.active {
+            return Ok(false);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.editor.cancel();
+                self.set_status("Edit cancelled");
+            }
+            KeyCode::Enter => {
+                if let Some(target) = self.editor.target().cloned() {
+                    let value = self.editor.value.clone();
+                    self.editor.cancel();
+                    self.commit_field_edit(target, value)?;
+                    self.set_status("Field updated");
+                } else {
+                    self.editor.cancel();
+                    self.set_status("Field not editable");
+                }
+            }
+            KeyCode::Backspace => {
+                self.editor.value.pop();
+            }
+            KeyCode::Char(c) => {
+                let disallowed =
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
+                if !key.modifiers.intersects(disallowed) {
+                    self.editor.value.push(c);
+                }
+            }
+            _ => {}
+        }
+
         Ok(true)
     }
 
@@ -601,6 +669,10 @@ impl<'a> App<'a> {
         self.config.ui.pane.image.width
     }
 
+    pub fn image_pane_height(&self) -> u16 {
+        self.config.ui.pane.image.height
+    }
+
     pub fn contact_path_display(&self, path: &Path) -> String {
         let relative = path.strip_prefix(&self.config.vdir).unwrap_or(path);
 
@@ -618,12 +690,63 @@ impl<'a> App<'a> {
 
     fn begin_edit(&mut self) {
         if let Some(field) = self.focused_field() {
-            let PaneField { label, value, .. } = field;
-            self.editor.start(&label, &value);
-            self.set_status(format!("Editing {} (read-only)", label));
+            if let Some(source) = field.source() {
+                self.editor
+                    .start(&field.label, field.copy_text(), source);
+                self.set_status(format!("Editing {}", field.label));
+            } else {
+                self.set_status("Field not editable");
+            }
         } else {
             self.set_status("Nothing to edit");
         }
+    }
+
+    fn commit_field_edit(&mut self, target: FieldRef, new_value: String) -> Result<()> {
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(());
+        };
+
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() {
+            self.set_status("Contact has no cards");
+            return Ok(());
+        }
+
+        let updated = {
+            let card = cards.get_mut(0).unwrap();
+            vcard_io::update_card_field(
+                card,
+                &target.field,
+                target.seq,
+                target.component,
+                &new_value,
+                self.config.phone_region.as_deref(),
+            )?
+        };
+
+        if !updated {
+            self.set_status("Field not editable");
+            return Ok(());
+        }
+
+        vcard_io::write_cards(&contact.path, &cards)?;
+
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        let previous_index = self.card_field_index;
+        self.refresh_contacts()?;
+        if !self.card_fields.is_empty() {
+            let max_index = self.card_fields.len().saturating_sub(1);
+            self.card_field_index = previous_index.min(max_index);
+        }
+
+        Ok(())
     }
 
     fn key_matches(&self, event: &KeyEvent, binding: &str) -> bool {
@@ -770,22 +893,6 @@ where
 {
     let mut fields = Vec::new();
 
-    let (fname_value, mname_value, lname_value) = extract_name_parts(props)
-        .map(
-            |NameParts {
-                 family,
-                 given,
-                 additional,
-             }| {
-                (
-                    fallback_placeholder(given),
-                    fallback_placeholder(additional),
-                    fallback_placeholder(family),
-                )
-            },
-        )
-        .unwrap_or_else(|| ("—".to_string(), "—".to_string(), "—".to_string()));
-
     let alias_value = if aliases.is_empty() {
         "—".to_string()
     } else {
@@ -797,12 +904,84 @@ where
     let first_email = props.iter().find(|p| p.field == "EMAIL");
     let total_email_count = props.iter().filter(|p| p.field == "EMAIL").count();
 
+    let mut handled_name = false;
+
     for item in order {
         let key = item.as_ref().trim().to_ascii_lowercase();
         match key.as_str() {
-            "fname" => fields.push(PaneField::new("FNAME", fname_value.clone())),
-            "mname" => fields.push(PaneField::new("MNAME", mname_value.clone())),
-            "lname" => fields.push(PaneField::new("LNAME", lname_value.clone())),
+            "fname" => {
+                if let Some(prop) = props.iter().find(|p| p.field == "FN") {
+                    let value = prop.value.trim().to_string();
+                    fields.push(PaneField::from_prop(
+                        "FNAME",
+                        value.clone(),
+                        value,
+                        "FN",
+                        prop.seq,
+                        None,
+                    ));
+                }
+                if !handled_name {
+                    handled_name = true;
+                    if let Some(prop) = props.iter().find(|p| p.field == "N") {
+                        for (idx, component) in name_components(&prop.value).into_iter().enumerate() {
+                            let display_component = if component.is_empty() {
+                                "—".to_string()
+                            } else {
+                                component.clone()
+                            };
+                            let copy_component = component.clone();
+                            let label = match idx {
+                                0 => "NAME_FAMILY",
+                                1 => "NAME_GIVEN",
+                                2 => "NAME_ADDITIONAL",
+                                3 => "NAME_PREFIX",
+                                4 => "NAME_SUFFIX",
+                                _ => "NAME",
+                            };
+                            fields.push(PaneField::from_prop(
+                                label,
+                                display_component,
+                                copy_component,
+                                "N",
+                                prop.seq,
+                                Some(idx),
+                            ));
+                        }
+                    }
+                }
+            }
+            "mname" | "lname" => {
+                if !handled_name {
+                    handled_name = true;
+                    if let Some(prop) = props.iter().find(|p| p.field == "N") {
+                        for (idx, component) in name_components(&prop.value).into_iter().enumerate() {
+                            let display_component = if component.is_empty() {
+                                "—".to_string()
+                            } else {
+                                component.clone()
+                            };
+                            let copy_component = component.clone();
+                            let label = match idx {
+                                0 => "NAME_FAMILY",
+                                1 => "NAME_GIVEN",
+                                2 => "NAME_ADDITIONAL",
+                                3 => "NAME_PREFIX",
+                                4 => "NAME_SUFFIX",
+                                _ => "NAME",
+                            };
+                            fields.push(PaneField::from_prop(
+                                label,
+                                display_component,
+                                copy_component,
+                                "N",
+                                prop.seq,
+                                Some(idx),
+                            ));
+                        }
+                    }
+                }
+            }
             "alias" => fields.push(PaneField::new("ALIAS", alias_value.clone())),
             "phone" => {
                 if let Some(prop) = first_phone {
@@ -814,10 +993,13 @@ where
                         } else {
                             base_value.clone()
                         };
-                        fields.push(PaneField::with_copy_value(
+                        fields.push(PaneField::from_prop(
                             label,
                             display_value,
                             base_value,
+                            "TEL",
+                            prop.seq,
+                            None,
                         ));
                     }
                 }
@@ -831,7 +1013,14 @@ where
                     } else {
                         copy_text.clone()
                     };
-                    fields.push(PaneField::with_copy_value(label, display_value, copy_text));
+                    fields.push(PaneField::from_prop(
+                        label,
+                        display_value,
+                        copy_text,
+                        "EMAIL",
+                        prop.seq,
+                        None,
+                    ));
                 }
             }
             _ => {}
@@ -873,23 +1062,18 @@ fn build_work_fields(props: &[PropRow], default_region: Option<&str>) -> Vec<Pan
     for prop in props.iter().filter(|p| p.field == "EMAIL") {
         if prop_has_type(&prop.params, "work") {
             let label = format_label_with_type("EMAIL", &prop.params);
-            fields.push(PaneField::new(
-                label,
-                format_with_index(&prop.value, prop.seq),
-            ));
+            let base = prop.value.trim().to_string();
+            let display = format_with_index(&base, prop.seq);
+            fields.push(PaneField::from_prop(label, display, base, "EMAIL", prop.seq, None));
         }
     }
 
     for prop in props.iter().filter(|p| p.field == "TEL") {
         if prop_has_type(&prop.params, "work") {
             let label = format_label_with_type("PHONE", &prop.params);
-            fields.push(PaneField::new(
-                label,
-                format_with_index(
-                    &vcard_io::phone_display_value(&prop.value, default_region),
-                    prop.seq,
-                ),
-            ));
+            let base = vcard_io::phone_display_value(&prop.value, default_region);
+            let display = format_with_index(&base, prop.seq);
+            fields.push(PaneField::from_prop(label, display, base, "TEL", prop.seq, None));
         }
     }
 
@@ -916,23 +1100,18 @@ fn build_personal_fields(props: &[PropRow], default_region: Option<&str>) -> Vec
     for prop in props.iter().filter(|p| p.field == "EMAIL") {
         if prop_has_type(&prop.params, "home") {
             let label = format_label_with_type("EMAIL", &prop.params);
-            fields.push(PaneField::new(
-                label,
-                format_with_index(&prop.value, prop.seq),
-            ));
+            let base = prop.value.trim().to_string();
+            let display = format_with_index(&base, prop.seq);
+            fields.push(PaneField::from_prop(label, display, base, "EMAIL", prop.seq, None));
         }
     }
 
     for prop in props.iter().filter(|p| p.field == "TEL") {
         if prop_has_type(&prop.params, "home") {
             let label = format_label_with_type("PHONE", &prop.params);
-            fields.push(PaneField::new(
-                label,
-                format_with_index(
-                    &vcard_io::phone_display_value(&prop.value, default_region),
-                    prop.seq,
-                ),
-            ));
+            let base = vcard_io::phone_display_value(&prop.value, default_region);
+            let display = format_with_index(&base, prop.seq);
+            fields.push(PaneField::from_prop(label, display, base, "TEL", prop.seq, None));
         }
     }
 
@@ -1052,29 +1231,15 @@ fn format_address_value(prop: &PropRow) -> String {
     }
 }
 
-fn fallback_placeholder(value: String) -> String {
-    if value.trim().is_empty() {
-        "—".to_string()
-    } else {
-        value
+fn name_components(value: &str) -> Vec<String> {
+    let mut components: Vec<String> = value
+        .split(';')
+        .map(|part| part.trim().to_string())
+        .collect();
+    let max_parts = 5;
+    components.resize(max_parts, String::new());
+    if components.is_empty() {
+        components.push("".to_string());
     }
-}
-
-struct NameParts {
-    family: String,
-    given: String,
-    additional: String,
-}
-
-fn extract_name_parts(props: &[PropRow]) -> Option<NameParts> {
-    let prop = props.iter().find(|p| p.field == "N")?;
-    let mut parts = prop.value.split(';');
-    let family = parts.next().unwrap_or("").to_string();
-    let given = parts.next().unwrap_or("").to_string();
-    let additional = parts.next().unwrap_or("").to_string();
-    Some(NameParts {
-        family,
-        given,
-        additional,
-    })
+    components
 }

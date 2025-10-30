@@ -74,7 +74,7 @@ fn main() -> Result<()> {
     let mut db = Database::open()?;
     reindex(&mut db, &config, cli.reindex)?;
 
-    let mut app = ui::app::App::new(&db, &config)?;
+    let mut app = ui::app::App::new(&mut db, &config)?;
     app.run()?;
 
     Ok(())

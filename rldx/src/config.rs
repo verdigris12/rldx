@@ -53,6 +53,7 @@ pub struct UiPane {
 #[derive(Debug, Clone)]
 pub struct UiPaneImage {
     pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -342,7 +343,7 @@ fn warn_unknown_ui_pane_image(value: &toml::Value) {
     let Some(table) = value.as_table() else {
         return;
     };
-    let known = HashSet::from(["width".to_string()]);
+    let known = HashSet::from(["width".to_string(), "height".to_string()]);
     for key in table.keys() {
         if !known.contains(key) {
             eprintln!("warning: unknown ui.pane.image entry `{}`", key);
@@ -440,11 +441,15 @@ impl Default for UiPaneFile {
 #[serde(default)]
 struct UiPaneImageFile {
     width: u16,
+    height: u16,
 }
 
 impl Default for UiPaneImageFile {
     fn default() -> Self {
-        Self { width: 40 }
+        Self {
+            width: 40,
+            height: 12,
+        }
     }
 }
 
@@ -454,6 +459,11 @@ impl From<UiFile> for UiConfig {
             40
         } else {
             file.pane.image.width
+        };
+        let image_height = if file.pane.image.height == 0 {
+            12
+        } else {
+            file.pane.image.height
         };
         Self {
             colors: UiColors {
@@ -472,6 +482,7 @@ impl From<UiFile> for UiConfig {
             pane: UiPane {
                 image: UiPaneImage {
                     width: image_width,
+                    height: image_height,
                 },
             },
         }

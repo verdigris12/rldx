@@ -3,7 +3,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::config::RgbColor;
@@ -30,6 +30,10 @@ fn draw_frame(frame: &mut Frame<'_>, app: &App) {
     draw_header(frame, layout[0], app);
     draw_body(frame, layout[1], app);
     draw_footer(frame, layout[2], app);
+
+    if app.editor.active {
+        draw_editor_overlay(frame, size, app);
+    }
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -95,7 +99,22 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .split(vertical[0]);
 
     draw_main_card(frame, upper[0], app);
-    draw_image(frame, upper[1], app);
+
+    let mut image_area = upper[1];
+    let desired_height = app.image_pane_height();
+    if image_area.height > desired_height {
+        image_area.height = desired_height;
+    }
+    draw_image(frame, image_area, app);
+    if upper[1].height > image_area.height {
+        let clear_rect = Rect {
+            x: upper[1].x,
+            y: upper[1].y + image_area.height,
+            width: upper[1].width,
+            height: upper[1].height - image_area.height,
+        };
+        frame.render_widget(Clear, clear_rect);
+    }
     draw_tabs(frame, vertical[1], app);
 }
 
@@ -273,7 +292,13 @@ fn build_tab_header(app: &App) -> Line<'static> {
 }
 
 fn field_line(app: &App, field: &PaneField, highlight: bool) -> Line<'static> {
-    let (label_style, value_style) = line_styles(app, highlight);
+    let editing = app.editor.active
+        && field
+            .source()
+            .zip(app.editor.target())
+            .map(|(lhs, rhs)| lhs == *rhs)
+            .unwrap_or(false);
+    let (label_style, value_style) = line_styles(app, highlight || editing);
     let label = format!("{}: ", field.label);
     Line::from(vec![
         Span::styled(label, label_style),
@@ -332,6 +357,49 @@ fn header_text_style(app: &App) -> Style {
 fn separator_style(app: &App) -> Style {
     let colors = app.ui_colors();
     Style::default().fg(color(colors.separator))
+}
+
+fn draw_editor_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let width = area.width.min(60);
+    let height = area.height.min(7);
+    let popup = centered_rect(width, height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("EDIT FIELD");
+    frame.render_widget(block.clone(), popup);
+
+    let inner = block.inner(popup);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let label = app.editor.label().unwrap_or("FIELD");
+    let mut value = app.editor.value.clone();
+    value.push('_');
+
+    let lines = vec![
+        Line::from(label.to_string()),
+        Line::from(value),
+        Line::from("Enter=Save   Esc=Cancel"),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let clamped_width = width.min(area.width);
+    let clamped_height = height.min(area.height);
+    let x = area.x + (area.width.saturating_sub(clamped_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(clamped_height)) / 2;
+    Rect {
+        x,
+        y,
+        width: clamped_width,
+        height: clamped_height,
+    }
 }
 
 fn render_header_with_double_line(

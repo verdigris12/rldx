@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use rlibphonenumber::{region_code::RegionCode, PhoneNumber, PhoneNumberFormat, PHONE_NUMBER_UTIL};
 use uuid::Uuid;
-use vcard4::property::{DateTimeProperty, TextOrUriProperty, TextProperty};
+use vcard4::property::{DateTimeProperty, TextListProperty, TextOrUriProperty, TextProperty};
 use vcard4::{parse, DateTime, Uri, Vcard};
 
 /// Representation of a parsed vCard alongside metadata derived from the
@@ -27,7 +27,7 @@ pub fn parse_file(path: &Path, default_region: Option<&str>) -> Result<ParsedCar
         .with_context(|| format!("failed to read vCard file at {}", path.display()))?;
     let parsed = parse_str(&input, default_region)?;
     if parsed.changed {
-        write_cards_to_path(path, &parsed.cards)?;
+        write_cards(path, &parsed.cards)?;
     }
     Ok(parsed)
 }
@@ -251,7 +251,7 @@ pub fn phone_display_value(raw: &str, default_region: Option<&str>) -> String {
         .unwrap_or_else(|| remainder.to_string())
 }
 
-fn write_cards_to_path(path: &Path, cards: &[Vcard]) -> Result<()> {
+pub fn write_cards(path: &Path, cards: &[Vcard]) -> Result<()> {
     let mut output = String::new();
     for (idx, card) in cards.iter().enumerate() {
         if idx > 0 {
@@ -315,4 +315,109 @@ pub fn touch_rev(card: &mut Vcard) {
 /// Render the card to its canonical textual form.
 pub fn card_to_bytes(card: &Vcard) -> Vec<u8> {
     card.to_string().into_bytes()
+}
+
+pub fn update_card_field(
+    card: &mut Vcard,
+    field: &str,
+    seq: i64,
+    component: Option<usize>,
+    new_value: &str,
+    default_region: Option<&str>,
+) -> Result<bool> {
+    match field.to_ascii_uppercase().as_str() {
+        "TEL" => update_tel_value(card, seq, new_value, default_region),
+        "EMAIL" => Ok(update_email_value(card, seq, new_value)),
+        "FN" => Ok(update_fn_value(card, seq, new_value)),
+        "N" => Ok(update_n_value(card, component, new_value)),
+        _ => Ok(false),
+    }
+}
+
+fn update_tel_value(
+    card: &mut Vcard,
+    seq: i64,
+    new_value: &str,
+    default_region: Option<&str>,
+) -> Result<bool> {
+    let normalized = normalize_phone_value(new_value, default_region)
+        .map(|n| n.value)
+        .unwrap_or_else(|| new_value.trim().to_string());
+
+    let mut index = 0;
+    for prop in &mut card.tel {
+        if index == seq {
+            match prop {
+                TextOrUriProperty::Text(text) => {
+                    text.value = normalized.clone();
+                }
+                TextOrUriProperty::Uri(uri_prop) => {
+                    let uri_text = format!("tel:{}", normalized);
+                    let parsed = uri_text
+                        .parse::<Uri>()
+                        .with_context(|| format!("invalid telephone URI: {}", uri_text))?;
+                    uri_prop.value = parsed;
+                }
+            }
+            return Ok(true);
+        }
+        index += 1;
+    }
+
+    Ok(false)
+}
+
+fn update_email_value(card: &mut Vcard, seq: i64, new_value: &str) -> bool {
+    let trimmed = new_value.trim();
+    let mut index = 0;
+    for prop in &mut card.email {
+        if index == seq {
+            prop.value = trimmed.to_string();
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn update_fn_value(card: &mut Vcard, seq: i64, new_value: &str) -> bool {
+    if seq < 0 {
+        return false;
+    }
+
+    let idx = match usize::try_from(seq) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+
+    let trimmed = new_value.trim().to_string();
+    if card.formatted_name.len() <= idx {
+        card.formatted_name
+            .resize_with(idx + 1, || TextProperty { group: None, value: String::new(), parameters: None });
+    }
+
+    if let Some(prop) = card.formatted_name.get_mut(idx) {
+        prop.value = trimmed;
+        true
+    } else {
+        false
+    }
+}
+
+fn update_n_value(card: &mut Vcard, component: Option<usize>, new_value: &str) -> bool {
+    let Some(index) = component else {
+        return false;
+    };
+
+    let trimmed = new_value.trim().to_string();
+    let entry = card
+        .name
+        .get_or_insert_with(|| TextListProperty::new_semi_colon(Vec::new()));
+
+    if entry.value.len() <= index {
+        entry.value.resize(index + 1, String::new());
+    }
+
+    entry.value[index] = trimmed;
+    true
 }
