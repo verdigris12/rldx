@@ -15,6 +15,7 @@ pub struct Config {
     pub config_path: PathBuf,
     pub vdir: PathBuf,
     pub fields_first_pane: Vec<String>,
+    pub phone_region: Option<String>,
     pub keys: Keys,
     pub ui: UiConfig,
     pub commands: Commands,
@@ -108,6 +109,7 @@ struct ConfigFile {
     vdir: Option<PathBuf>,
     #[serde(default = "default_fields_first_pane")]
     fields_first_pane: Vec<String>,
+    phone_region: Option<String>,
     #[serde(default)]
     keys: Keys,
     #[serde(default)]
@@ -121,6 +123,7 @@ impl Default for ConfigFile {
         Self {
             vdir: None,
             fields_first_pane: default_fields_first_pane(),
+            phone_region: None,
             keys: Keys::default(),
             ui: UiFile::default(),
             commands: CommandsFile::default(),
@@ -188,10 +191,18 @@ pub fn load() -> Result<Config> {
         bail!("configured vdir does not exist: {}", vdir.display());
     }
 
+    let phone_region = cfg_file
+        .phone_region
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase());
+
     Ok(Config {
         config_path: path,
         vdir,
         fields_first_pane: cfg_file.fields_first_pane,
+        phone_region,
         keys: cfg_file.keys,
         ui: cfg_file.ui.into(),
         commands: cfg_file.commands.into(),
@@ -206,6 +217,7 @@ fn warn_unknown_keys(value: &toml::Value) {
     let known = HashSet::from([
         "vdir".to_string(),
         "fields_first_pane".to_string(),
+        "phone_region".to_string(),
         "keys".to_string(),
         "ui".to_string(),
         "commands".to_string(),

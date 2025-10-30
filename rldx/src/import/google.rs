@@ -41,7 +41,7 @@ pub fn import_google_contacts(input: &Path, config: &Config, book: Option<&str>)
     let mut imported = 0usize;
 
     for (index, card_lines) in cards.iter().enumerate() {
-        match convert_google_card(card_lines) {
+        match convert_google_card(card_lines, config.phone_region.as_deref()) {
             Ok(mut card) => {
                 let uuid = vcard_io::ensure_uuid_uid(&mut card)?;
                 vcard_io::touch_rev(&mut card);
@@ -94,7 +94,7 @@ fn split_cards(content: &str) -> Vec<Vec<String>> {
     cards
 }
 
-fn convert_google_card(lines: &[String]) -> Result<Vcard> {
+fn convert_google_card(lines: &[String], default_region: Option<&str>) -> Result<Vcard> {
     let unfolded = unfold_lines(lines);
 
     let mut output: Vec<String> = Vec::new();
@@ -121,8 +121,9 @@ fn convert_google_card(lines: &[String]) -> Result<Vcard> {
     output.push(END_VCARD.to_string());
     let joined = output.join("\r\n");
 
-    let parsed = vcard_io::parse_str(&joined)?;
+    let parsed = vcard_io::parse_str(&joined, default_region)?;
     parsed
+        .cards
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("converted card failed to parse"))

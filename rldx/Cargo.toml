@@ -26,3 +26,5 @@ time = { version = "0.3.36", features = ["macros", "formatting", "parsing"] }
 toml = "0.8.14"
 uuid = { version = "1.8.0", features = ["v4", "serde"] }
 vcard4 = "0.7.2"
+rlibphonenumber = "0.2.3"
+home = "0.5.5"

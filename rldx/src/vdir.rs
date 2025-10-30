@@ -21,7 +21,7 @@ pub fn marker_path(vdir: &Path) -> PathBuf {
     vdir.join(NORMALIZED_MARKER)
 }
 
-pub fn normalize(vdir: &Path) -> Result<NormalizationReport> {
+pub fn normalize(vdir: &Path, default_region: Option<&str>) -> Result<NormalizationReport> {
     let mut report = NormalizationReport::default();
 
     if !vdir.exists() {
@@ -42,7 +42,7 @@ pub fn normalize(vdir: &Path) -> Result<NormalizationReport> {
     for path in entries {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        match vcard_io::parse_str_with_source(&content) {
+        match vcard_io::parse_str_with_source(&content, default_region) {
             Ok(cards) => {
                 process_cards(
                     vdir,

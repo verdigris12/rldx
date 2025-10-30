@@ -4,6 +4,9 @@ vdir = "/path/to/your/vdir"
 # Optional: override which fields appear in the first pane.
 # fields_first_pane = ["fname", "mname", "lname", "alias", "phone", "email"]
 
+# Optional: default region to use when normalizing phone numbers (ISO 3166-1 alpha-2).
+# phone_region = "US"
+
 [ui.colors]
 # RGB values for the UI theme.
 border = [255, 140, 0]

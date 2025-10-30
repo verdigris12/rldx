@@ -63,7 +63,7 @@ fn main() -> Result<()> {
 
     println!("Loaded configuration from {}", config.config_path.display());
 
-    let normalize_report = vdir::normalize(&config.vdir)?;
+    let normalize_report = vdir::normalize(&config.vdir, config.phone_region.as_deref())?;
     if !normalize_report.needs_upgrade.is_empty() {
         eprintln!(
             "warning: {} cards require manual upgrade to vCard 4.0",
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
 }
 
 fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
-    let normalize_report = vdir::normalize(&config.vdir)?;
+    let normalize_report = vdir::normalize(&config.vdir, config.phone_region.as_deref())?;
     if !normalize_report.needs_upgrade.is_empty() {
         eprintln!(
             "warning: {} cards require manual upgrade to vCard 4.0",
@@ -110,21 +110,20 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
     let stored = db.stored_items()?;
 
     for path in files {
-        let state = vdir::compute_file_state(&path)?;
-        let needs_update = match stored.get(&path) {
-            Some(existing)
-                if !force && existing.sha1 == state.sha1 && existing.mtime == state.mtime =>
-            {
-                false
-            }
-            _ => true,
-        };
+        let mut state = vdir::compute_file_state(&path)?;
+        let mut requires_index = force;
 
-        if !needs_update {
-            continue;
+        if !requires_index {
+            requires_index = match stored.get(&path) {
+                Some(existing) => existing.sha1 != state.sha1 || existing.mtime != state.mtime,
+                None => true,
+            };
         }
 
-        let cards = vcard_io::parse_file(&path)?;
+        let parsed = vcard_io::parse_file(&path, config.phone_region.as_deref())?;
+        let cards = parsed.cards;
+        let changed = parsed.changed;
+
         if cards.is_empty() {
             eprintln!("warning: file {} contained no vCards", path.display());
             continue;
@@ -136,6 +135,16 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
                 cards.len()
             );
         }
+
+        if changed {
+            state = vdir::compute_file_state(&path)?;
+            requires_index = true;
+        }
+
+        if !requires_index {
+            continue;
+        }
+
         let card = cards.into_iter().next().unwrap();
         let record = indexer::build_record(&path, &card, &state, None)?;
         db.upsert(&record.item, &record.props)?;

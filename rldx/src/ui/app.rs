@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::config::{CommandExec, Config, UiColors};
 use crate::db::{ContactItem, ContactListEntry, Database, PropRow};
 use crate::search;
+use crate::vcard_io;
 
 use super::draw;
 use super::edit::InlineEditor;
@@ -439,11 +440,14 @@ impl<'a> App<'a> {
     }
 
     fn rebuild_field_views(&mut self) {
+        let default_region = self.config.phone_region.as_deref();
+
         if self.current_contact.is_some() {
             self.card_fields = build_card_fields(
                 &self.current_props,
                 &self.aliases,
                 &self.config.fields_first_pane,
+                default_region,
             );
         } else {
             self.card_fields.clear();
@@ -458,7 +462,7 @@ impl<'a> App<'a> {
         for tab in DetailTab::ALL {
             let idx = tab.index();
             if self.current_contact.is_some() {
-                self.tab_fields[idx] = build_tab_fields(tab, &self.current_props);
+                self.tab_fields[idx] = build_tab_fields(tab, &self.current_props, default_region);
             } else {
                 self.tab_fields[idx].clear();
             }
@@ -730,16 +734,36 @@ fn collect_languages(props: &[PropRow]) -> Vec<String> {
 
 const DEFAULT_CARD_FIELDS: &[&str] = &["fname", "mname", "lname", "alias", "phone", "email"];
 
-fn build_card_fields(props: &[PropRow], aliases: &[String], order: &[String]) -> Vec<PaneField> {
-    let fields = build_card_fields_inner(props, aliases, order.iter().map(|s| s.as_str()));
+fn build_card_fields(
+    props: &[PropRow],
+    aliases: &[String],
+    order: &[String],
+    default_region: Option<&str>,
+) -> Vec<PaneField> {
+    let fields = build_card_fields_inner(
+        props,
+        aliases,
+        order.iter().map(|s| s.as_str()),
+        default_region,
+    );
     if fields.is_empty() {
-        build_card_fields_inner(props, aliases, DEFAULT_CARD_FIELDS.iter().copied())
+        build_card_fields_inner(
+            props,
+            aliases,
+            DEFAULT_CARD_FIELDS.iter().copied(),
+            default_region,
+        )
     } else {
         fields
     }
 }
 
-fn build_card_fields_inner<I, S>(props: &[PropRow], aliases: &[String], order: I) -> Vec<PaneField>
+fn build_card_fields_inner<I, S>(
+    props: &[PropRow],
+    aliases: &[String],
+    order: I,
+    default_region: Option<&str>,
+) -> Vec<PaneField>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -783,13 +807,19 @@ where
             "phone" => {
                 if let Some(prop) = first_phone {
                     let label = "PHONE".to_string();
-                    let copy_text = prop.value.trim().to_string();
-                    let display_value = if total_phone_count > 1 && !copy_text.is_empty() {
-                        format!("{} [{}]", copy_text, total_phone_count)
-                    } else {
-                        copy_text.clone()
-                    };
-                    fields.push(PaneField::with_copy_value(label, display_value, copy_text));
+                    let base_value = vcard_io::phone_display_value(&prop.value, default_region);
+                    if !base_value.is_empty() {
+                        let display_value = if total_phone_count > 1 {
+                            format!("{} [{}]", base_value, total_phone_count)
+                        } else {
+                            base_value.clone()
+                        };
+                        fields.push(PaneField::with_copy_value(
+                            label,
+                            display_value,
+                            base_value,
+                        ));
+                    }
                 }
             }
             "email" => {
@@ -811,16 +841,16 @@ where
     fields
 }
 
-fn build_tab_fields(tab: DetailTab, props: &[PropRow]) -> Vec<PaneField> {
+fn build_tab_fields(tab: DetailTab, props: &[PropRow], default_region: Option<&str>) -> Vec<PaneField> {
     match tab {
-        DetailTab::Work => build_work_fields(props),
-        DetailTab::Personal => build_personal_fields(props),
+        DetailTab::Work => build_work_fields(props, default_region),
+        DetailTab::Personal => build_personal_fields(props, default_region),
         DetailTab::Accounts => build_account_fields(props),
         DetailTab::Metadata => build_metadata_fields(props),
     }
 }
 
-fn build_work_fields(props: &[PropRow]) -> Vec<PaneField> {
+fn build_work_fields(props: &[PropRow], default_region: Option<&str>) -> Vec<PaneField> {
     let mut fields = Vec::new();
 
     for prop in props.iter().filter(|p| p.field == "ORG") {
@@ -855,7 +885,10 @@ fn build_work_fields(props: &[PropRow]) -> Vec<PaneField> {
             let label = format_label_with_type("PHONE", &prop.params);
             fields.push(PaneField::new(
                 label,
-                format_with_index(&prop.value, prop.seq),
+                format_with_index(
+                    &vcard_io::phone_display_value(&prop.value, default_region),
+                    prop.seq,
+                ),
             ));
         }
     }
@@ -863,7 +896,7 @@ fn build_work_fields(props: &[PropRow]) -> Vec<PaneField> {
     fields
 }
 
-fn build_personal_fields(props: &[PropRow]) -> Vec<PaneField> {
+fn build_personal_fields(props: &[PropRow], default_region: Option<&str>) -> Vec<PaneField> {
     let mut fields = Vec::new();
 
     for prop in props.iter().filter(|p| p.field == "BDAY") {
@@ -895,7 +928,10 @@ fn build_personal_fields(props: &[PropRow]) -> Vec<PaneField> {
             let label = format_label_with_type("PHONE", &prop.params);
             fields.push(PaneField::new(
                 label,
-                format_with_index(&prop.value, prop.seq),
+                format_with_index(
+                    &vcard_io::phone_display_value(&prop.value, default_region),
+                    prop.seq,
+                ),
             ));
         }
     }
