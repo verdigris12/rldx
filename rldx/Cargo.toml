@@ -13,9 +13,10 @@ base64 = "0.22.1"
 clap = { version = "4.5.4", features = ["derive"] }
 crossterm = "0.27.0"
 directories = "5.0.1"
-image = { version = "0.25.1", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.24.9", default-features = false, features = ["png", "jpeg"] }
 libdav = { version = "0.9.6", optional = true }
 ratatui = "0.26.1"
+ratatui-image = "0.6"
 reqwest = { version = "0.12.4", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 serde = { version = "1.0.210", features = ["derive"] }

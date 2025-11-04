@@ -1,4 +1,4 @@
-use std::io::{stdout, Cursor, Write};
+use std::io::{stdout, Write};
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -11,6 +11,7 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use serde_json::Value;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -23,7 +24,7 @@ use crate::search;
 use crate::vcard_io;
 use crate::vdir;
 
-use image::{self, ImageFormat};
+use image::{self, DynamicImage};
 
 use super::draw;
 use super::edit::{FieldRef, InlineEditor};
@@ -86,6 +87,24 @@ impl PaneField {
     }
 }
 
+const DEFAULT_FONT_SIZE: (u16, u16) = (8, 16);
+
+fn create_image_picker() -> Picker {
+    let mut picker = base_picker();
+    picker.guess_protocol();
+    picker
+}
+
+#[cfg(unix)]
+fn base_picker() -> Picker {
+    Picker::from_termios().unwrap_or_else(|_| Picker::new(DEFAULT_FONT_SIZE))
+}
+
+#[cfg(not(unix))]
+fn base_picker() -> Picker {
+    Picker::new(DEFAULT_FONT_SIZE)
+}
+
 const DEFAULT_ADDRESS_BOOK: &str = "default";
 
 #[derive(Debug, Clone)]
@@ -129,6 +148,8 @@ pub struct App<'a> {
     pub tab_field_indices: [usize; DetailTab::COUNT],
     pub search_rows: Vec<SearchRow>,
     pub selected_row: Option<usize>,
+    image_picker: Picker,
+    image_state: Option<Box<dyn StatefulProtocol>>,
     pub photo_data: Option<PhotoData>,
     pub photo_error: Option<String>,
 }
@@ -157,6 +178,8 @@ impl<'a> App<'a> {
             tab_field_indices: [0; DetailTab::COUNT],
             search_rows: Vec::new(),
             selected_row: None,
+            image_picker: create_image_picker(),
+            image_state: None,
             photo_data: None,
             photo_error: None,
         };
@@ -508,8 +531,8 @@ impl<'a> App<'a> {
             self.current_props.clear();
             self.aliases.clear();
             self.languages.clear();
-            self.photo_data = None;
             self.photo_error = None;
+            self.set_photo(None);
             self.rebuild_field_views();
             return Ok(());
         }
@@ -522,15 +545,29 @@ impl<'a> App<'a> {
         match decode_embedded_photo(&self.current_props) {
             Ok(photo) => {
                 self.photo_error = None;
-                self.photo_data = photo;
+                self.set_photo(photo);
             }
             Err(err) => {
                 self.photo_error = Some(err.to_string());
-                self.photo_data = None;
+                self.set_photo(None);
             }
         }
         self.rebuild_field_views();
         Ok(())
+    }
+
+    fn set_photo(&mut self, photo: Option<PhotoData>) {
+        match photo {
+            Some(photo) => {
+                let protocol = self.image_picker.new_resize_protocol(photo.image().clone());
+                self.image_state = Some(protocol);
+                self.photo_data = Some(photo);
+            }
+            None => {
+                self.image_state = None;
+                self.photo_data = None;
+            }
+        }
     }
 
     fn rebuild_field_views(&mut self) {
@@ -699,8 +736,12 @@ impl<'a> App<'a> {
         self.config.ui.pane.image.height
     }
 
-    pub fn embedded_photo(&self) -> Option<&PhotoData> {
-        self.photo_data.as_ref()
+    pub fn profile_image_state(&mut self) -> Option<&mut Box<dyn StatefulProtocol>> {
+        self.image_state.as_mut()
+    }
+
+    pub fn image_font_size(&self) -> (u16, u16) {
+        self.image_picker.font_size
     }
 
     pub fn photo_error(&self) -> Option<&str> {
@@ -890,22 +931,12 @@ fn collect_languages(props: &[PropRow]) -> Vec<String> {
 
 #[derive(Debug, Clone)]
 pub struct PhotoData {
-    base64_png: String,
-    width: u32,
-    height: u32,
+    image: DynamicImage,
 }
 
 impl PhotoData {
-    pub fn png_base64(&self) -> &str {
-        &self.base64_png
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
+    pub fn image(&self) -> &DynamicImage {
+        &self.image
     }
 }
 
@@ -961,18 +992,8 @@ fn decode_photo_prop(prop: &PropRow) -> Result<Option<PhotoData>> {
 
     let image = image::load_from_memory(&data)
         .with_context(|| "unable to parse embedded photo data as image")?;
-    let (width, height) = (image.width(), image.height());
-    let mut png_bytes: Vec<u8> = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
-        .with_context(|| "failed to convert embedded photo to PNG")?;
-    let base64_png = BASE64_STANDARD.encode(png_bytes);
 
-    Ok(Some(PhotoData {
-        base64_png,
-        width,
-        height,
-    }))
+    Ok(Some(PhotoData { image }))
 }
 
 fn parse_data_uri(input: &str) -> Result<Vec<u8>> {
