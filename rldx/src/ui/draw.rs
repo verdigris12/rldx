@@ -168,8 +168,8 @@ fn draw_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
-    let header_line = Line::from(Span::styled(search_title(app), header_text_style(app)));
-    render_header_with_double_line(frame, layout[0], header_line, app);
+    let header_line = Line::from(Span::styled(search_title(app), selection_style(app)));
+    render_header_with_double_line(frame, layout[0], header_line, app, Some(selection_style(app)));
     draw_search_list(frame, layout[1], app);
 }
 
@@ -224,7 +224,7 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
             header_text_style(app),
         ))
     };
-    render_header_with_double_line(frame, layout[0], header_line, app);
+    render_header_with_double_line(frame, layout[0], header_line, app, None);
 
     let mut lines: Vec<Line> = Vec::new();
     if app.current_contact.is_none() {
@@ -299,7 +299,7 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
-    render_header_with_double_line(frame, layout[0], build_tab_header(app), app);
+    render_header_with_double_line(frame, layout[0], build_tab_header(app), app, None);
 
     let tab_index = app.tab.index();
     let fields = &app.tab_fields[tab_index];
@@ -534,13 +534,19 @@ fn render_header_with_double_line(
     area: Rect,
     content: Line<'static>,
     app: &App,
+    style: Option<Style>,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     if area.height == 1 {
-        frame.render_widget(Paragraph::new(content), area);
+        let paragraph = if let Some(style) = style {
+            Paragraph::new(content).style(style)
+        } else {
+            Paragraph::new(content)
+        };
+        frame.render_widget(paragraph, area);
         return;
     }
 
@@ -549,7 +555,13 @@ fn render_header_with_double_line(
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
-    frame.render_widget(Paragraph::new(content), layout[0]);
+    let paragraph = if let Some(style) = style {
+        Paragraph::new(content).style(style)
+    } else {
+        Paragraph::new(content)
+    };
+
+    frame.render_widget(paragraph, layout[0]);
 
     let separator = "═".repeat(layout[1].width as usize);
     let separator_line = Line::from(Span::styled(separator, separator_style(app)));
