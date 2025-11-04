@@ -230,6 +230,7 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     render_header_with_double_line(frame, layout[0], header_line, app, None);
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut cursor = None;
     if app.current_contact.is_none() {
         lines.push(Line::from("Select a contact"));
     } else if app.card_fields.is_empty() {
@@ -237,11 +238,24 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         for (idx, field) in app.card_fields.iter().enumerate() {
             let highlight = active && idx == app.card_field_index;
-            lines.push(field_line(app, field, highlight));
+            let line_index = lines.len();
+            let (line, cursor_info) = field_line(app, field, highlight);
+            if cursor.is_none() {
+                if let Some(column) = cursor_info {
+                    cursor = Some((line_index, column));
+                }
+            }
+            lines.push(line);
         }
     }
 
     frame.render_widget(Paragraph::new(lines), layout[1]);
+
+    if let Some((line_idx, column)) = cursor {
+        let x = layout[1].x.saturating_add(column as u16);
+        let y = layout[1].y.saturating_add(line_idx as u16);
+        frame.set_cursor(x, y);
+    }
 }
 
 fn draw_image(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -363,16 +377,30 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let fields = &app.tab_fields[tab_index];
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut cursor = None;
     if fields.is_empty() {
         lines.push(Line::from("No data"));
     } else {
         for (idx, field) in fields.iter().enumerate() {
             let highlight = focused && idx == app.tab_field_indices[tab_index];
-            lines.push(field_line(app, field, highlight));
+            let line_index = lines.len();
+            let (line, cursor_info) = field_line(app, field, highlight);
+            if cursor.is_none() {
+                if let Some(column) = cursor_info {
+                    cursor = Some((line_index, column));
+                }
+            }
+            lines.push(line);
         }
     }
 
     frame.render_widget(Paragraph::new(lines), layout[1]);
+
+    if let Some((line_idx, column)) = cursor {
+        let x = layout[1].x.saturating_add(column as u16);
+        let y = layout[1].y.saturating_add(line_idx as u16);
+        frame.set_cursor(x, y);
+    }
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -405,7 +433,7 @@ fn build_tab_header(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn field_line(app: &App, field: &PaneField, highlight: bool) -> Line<'static> {
+fn field_line(app: &App, field: &PaneField, highlight: bool) -> (Line<'static>, Option<usize>) {
     let editing = app.editor.active
         && field
             .source()
@@ -414,17 +442,20 @@ fn field_line(app: &App, field: &PaneField, highlight: bool) -> Line<'static> {
             .unwrap_or(false);
     let (label_style, value_style) = line_styles(app, highlight || editing);
     let label = format!("{}: ", field.label);
-    let value = if editing {
-        let mut text = app.editor.value.clone();
-        text.push('_');
-        text
+    let mut spans = vec![Span::styled(label.clone(), label_style)];
+    let mut cursor = None;
+
+    if editing {
+        let value = app.editor.value().to_string();
+        let label_width = Span::raw(label).width();
+        let cursor_column = label_width + app.editor.visual_cursor();
+        cursor = Some(cursor_column);
+        spans.push(Span::styled(value, value_style));
     } else {
-        field.value.clone()
-    };
-    Line::from(vec![
-        Span::styled(label, label_style),
-        Span::styled(value, value_style),
-    ])
+        spans.push(Span::styled(field.value.clone(), value_style));
+    }
+
+    (Line::from(spans), cursor)
 }
 
 fn line_styles(app: &App, highlight: bool) -> (Style, Style) {

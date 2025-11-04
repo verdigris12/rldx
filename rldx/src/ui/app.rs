@@ -346,7 +346,7 @@ impl<'a> App<'a> {
             }
             KeyCode::Enter => {
                 if let Some(target) = self.editor.target().cloned() {
-                    let value = self.editor.value.clone();
+                    let value = self.editor.value().to_string();
                     self.editor.cancel();
                     self.commit_field_edit(target, value)?;
                     self.set_status("Field updated");
@@ -355,16 +355,9 @@ impl<'a> App<'a> {
                     self.set_status("Field not editable");
                 }
             }
-            KeyCode::Backspace => {
-                self.editor.value.pop();
+            _ => {
+                self.editor.handle_key_event(key);
             }
-            KeyCode::Char(c) => {
-                let disallowed = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
-                if !key.modifiers.intersects(disallowed) {
-                    self.editor.value.push(c);
-                }
-            }
-            _ => {}
         }
 
         Ok(true)

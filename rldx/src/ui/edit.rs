@@ -1,3 +1,7 @@
+use crossterm::event::{Event, KeyEvent};
+use tui_input::backend::crossterm::EventHandler;
+use tui_input::Input;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldRef {
     pub field: String,
@@ -27,23 +31,35 @@ impl FieldRef {
 pub struct InlineEditor {
     pub active: bool,
     target: Option<FieldRef>,
-    pub value: String,
+    input: Input,
 }
 
 impl InlineEditor {
     pub fn start(&mut self, current: &str, target: FieldRef) {
         self.active = true;
         self.target = Some(target);
-        self.value = current.to_string();
+        self.input = Input::new(current.to_string());
     }
 
     pub fn cancel(&mut self) {
         self.active = false;
         self.target = None;
-        self.value.clear();
+        self.input.reset();
     }
 
     pub fn target(&self) -> Option<&FieldRef> {
         self.target.as_ref()
+    }
+
+    pub fn value(&self) -> &str {
+        self.input.value()
+    }
+
+    pub fn visual_cursor(&self) -> usize {
+        self.input.visual_cursor()
+    }
+
+    pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        self.input.handle_event(&Event::Key(key)).is_some()
     }
 }
