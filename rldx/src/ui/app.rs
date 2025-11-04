@@ -13,6 +13,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use serde_json::Value;
+use tui_input::backend::crossterm::EventHandler;
+use tui_input::Input;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -132,7 +134,7 @@ pub struct App<'a> {
     config: &'a Config,
     pub contacts: Vec<ContactListEntry>,
     pub selected: usize,
-    pub query: String,
+    pub search_input: Input,
     pub show_search: bool,
     pub current_contact: Option<ContactItem>,
     pub current_props: Vec<PropRow>,
@@ -162,7 +164,7 @@ impl<'a> App<'a> {
             config,
             contacts,
             selected: 0,
-            query: String::new(),
+            search_input: Input::default(),
             show_search: true,
             current_contact: None,
             current_props: Vec::new(),
@@ -314,24 +316,20 @@ impl<'a> App<'a> {
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<bool> {
-        match key.code {
-            KeyCode::Char(c) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.query.push(c);
-                    self.refresh_contacts()?;
-                }
-            }
-            KeyCode::Backspace => {
-                self.query.pop();
-                self.refresh_contacts()?;
-            }
-            KeyCode::Esc => {
-                self.show_search = false;
-                self.refresh_contacts()?;
-            }
-            _ => return Ok(false),
+        if matches!(key.code, KeyCode::Esc) {
+            self.show_search = false;
+            self.refresh_contacts()?;
+            return Ok(true);
         }
-        Ok(true)
+
+        if let Some(change) = self.search_input.handle_event(&Event::Key(key)) {
+            if change.value {
+                self.refresh_contacts()?;
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -369,7 +367,7 @@ impl<'a> App<'a> {
             .get(self.selected)
             .map(|entry| entry.uuid.clone());
 
-        let normalized = search::normalize_query(&self.query);
+        let normalized = search::normalize_query(self.search_input.value());
         self.contacts = if let Some(filter) = normalized.as_ref() {
             self.db.list_contacts(Some(filter))?
         } else {

@@ -165,15 +165,59 @@ fn draw_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
-    let header_line = Line::from(Span::styled(search_title(app), selection_style(app)));
-    render_header_with_double_line(
-        frame,
-        layout[0],
-        header_line,
-        app,
-        Some(selection_style(app)),
-    );
+    draw_search_header(frame, layout[0], app, active);
     draw_search_list(frame, layout[1], app);
+}
+
+fn draw_search_header(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let label = "SEARCH: ";
+    let label_style = header_text_style(app);
+    let value_style = if active {
+        selection_style(app)
+    } else {
+        Style::default()
+    };
+    let value = app.search_input.value();
+    let line = Line::from(vec![
+        Span::styled(label, label_style),
+        Span::styled(value.to_string(), value_style),
+    ]);
+
+    let cursor_column = if active {
+        let label_width = Span::raw(label).width();
+        Some(label_width + app.search_input.visual_cursor())
+    } else {
+        None
+    };
+
+    if area.height == 1 {
+        frame.render_widget(Paragraph::new(line.clone()), area);
+        if let Some(column) = cursor_column {
+            let x = area.x.saturating_add(column as u16);
+            frame.set_cursor(x, area.y);
+        }
+        return;
+    }
+
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+
+    frame.render_widget(Paragraph::new(line), parts[0]);
+
+    if let Some(column) = cursor_column {
+        let x = parts[0].x.saturating_add(column as u16);
+        frame.set_cursor(x, parts[0].y);
+    }
+
+    let separator = "═".repeat(parts[1].width as usize);
+    let separator_line = Line::from(Span::styled(separator, separator_style(app)));
+    frame.render_widget(Paragraph::new(separator_line), parts[1]);
 }
 
 fn draw_search_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -478,15 +522,6 @@ fn build_search_item(row: &SearchRow, app: &App) -> ListItem<'static> {
         item = item.style(header_text_style(app));
     }
     item
-}
-
-fn search_title(app: &App) -> String {
-    let trimmed = app.query.trim();
-    if trimmed.is_empty() {
-        "SEARCH".to_string()
-    } else {
-        format!("SEARCH: {}", trimmed.to_uppercase())
-    }
 }
 
 fn selection_style(app: &App) -> Style {
