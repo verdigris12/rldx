@@ -205,6 +205,12 @@ impl<'a> App<'a> {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        {
+            return Ok(true);
+        }
+
         if self.editor.active {
             if self.handle_editor_key(key)? {
                 return Ok(false);
