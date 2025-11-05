@@ -564,15 +564,21 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let message = if app.multivalue_modal().is_some() {
-        MULTIVALUE_HELP
+    let message: String = if app.multivalue_modal().is_some() {
+        MULTIVALUE_HELP.to_string()
     } else if app.show_search {
         match app.search_focus {
-            SearchFocus::Input => SEARCH_HELP_INPUT,
-            SearchFocus::Results => SEARCH_HELP_RESULTS,
+            SearchFocus::Input => SEARCH_HELP_INPUT.to_string(),
+            SearchFocus::Results => {
+                if app.show_marked_only {
+                    "Space: unmark  Shift+Space: show search results  /: focus search  Enter: close  Esc: close".to_string()
+                } else {
+                    "Space: mark  Shift+Space: show marked only  /: focus search  Enter: close  Esc: close".to_string()
+                }
+            }
         }
     } else {
-        app.status.as_deref().unwrap_or("READY")
+        app.status.clone().unwrap_or_else(|| "READY".to_string())
     };
     let colors = app.ui_colors();
     let style = Style::default()
@@ -582,7 +588,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let background = Block::default().style(Style::default().bg(color(colors.status_bg)));
     frame.render_widget(background, area);
 
-    frame.render_widget(Paragraph::new(message.to_string()).style(style), area);
+    frame.render_widget(Paragraph::new(message).style(style), area);
 }
 
 fn build_tab_header(app: &App) -> Line<'static> {
