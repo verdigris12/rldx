@@ -20,10 +20,4 @@ Needed:
 8. Pressing 'm' merges marked contacts; Merge strategy for N vcards:
   - The result of the merge is that a new vcard is created; old vcards are removed;
   - Merge inductively; First merge the first 2 vcards following the described strategy, then merge the resulting vcard with the 3d vcard etc. Therefore, the merge strategy is described for a pair of vcards only, but is applicable to an arbitrary amount
-  - If a vcard has a field others do not have, add it to the merged vcard without change
-  - Merge NICKNAME fields
-  - If vcard1 has FN==FN1 and vcard2 has FN==FN2, then the result should have FN=FN1 and add FN2 to NICKNAME, if NICKNAME already does not have a component equal to FN2
-  - If vcard1 and vcard2 have overlapping N* fields for the same locale - use vcard1 N* fields; 
-  - If vcard1 and vcard2 have an overlapping field FIELD that is not N*, FN or NICKNAME then in the resulting vcard FIELD:=vcard1.FIELD, and FIELD_i:=vcard2.FIELD
-
-
+  - Read ./merge-strategy.md for strategy

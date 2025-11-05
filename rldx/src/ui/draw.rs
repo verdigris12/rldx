@@ -17,7 +17,7 @@ use super::app::{App, PaneField, PaneFocus, SearchFocus, SearchRow};
 use super::panes::DetailTab;
 
 const MULTIVALUE_HELP: &str =
-    "TAB/Down: next  Backspace/Up: prev  Space: copy & close  Enter: set default  Q/Esc: close";
+    "TAB/Down: next  Backspace/Up: prev  Space: copy & close  Enter: set default  E: edit  Q/Esc: close";
 const SEARCH_HELP_INPUT: &str =
     "Type to filter  Enter: focus results  Esc: close";
 const SEARCH_HELP_RESULTS: &str =

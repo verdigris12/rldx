@@ -556,6 +556,33 @@ impl<'a> App<'a> {
             KeyCode::Char(c) if c.eq_ignore_ascii_case(&'q') => {
                 self.close_multivalue_modal();
             }
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'e') => {
+                if let Some((field, item)) = self.current_modal_selection() {
+                    // Promote to default so it appears in the card pane, then begin editing
+                    if self.set_multivalue_default(field, item.seq)? {
+                        // Focus card pane and move focus to the corresponding PHONE/EMAIL field
+                        self.focus_pane(PaneFocus::Card);
+                        if let Some((idx, pf)) = self
+                            .card_fields
+                            .iter()
+                            .enumerate()
+                            .find(|(_, f)| {
+                                f.source()
+                                    .map(|s| s.field.eq_ignore_ascii_case(field.field_name()))
+                                    .unwrap_or(false)
+                            })
+                        {
+                            self.card_field_index = idx;
+                            // Start inline edit for this field
+                            if let Some(source) = pf.source() {
+                                self.editor.start(pf.copy_text(), source);
+                                self.set_status(format!("Editing {}", pf.label));
+                            }
+                        }
+                        self.close_multivalue_modal();
+                    }
+                }
+            }
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(modal) = self.multivalue_modal.as_mut() {
                     modal.select_next();
