@@ -1365,6 +1365,7 @@ where
     S: AsRef<str>,
 {
     let mut fields = Vec::new();
+    let is_org = props_is_org(props);
 
     let alias_value = if aliases.is_empty() {
         "—".to_string()
@@ -1394,7 +1395,7 @@ where
                         None,
                     ));
                 }
-                if !handled_name {
+                if !handled_name && !is_org {
                     handled_name = true;
                     if let Some(prop) = props.iter().find(|p| p.field == "N") {
                         for (idx, component) in name_components(&prop.value).into_iter().enumerate()
@@ -1426,7 +1427,7 @@ where
                 }
             }
             "mname" | "lname" => {
-                if !handled_name {
+                if !handled_name && !is_org {
                     handled_name = true;
                     if let Some(prop) = props.iter().find(|p| p.field == "N") {
                         for (idx, component) in name_components(&prop.value).into_iter().enumerate()
@@ -1503,6 +1504,15 @@ where
     }
 
     fields
+}
+
+fn props_is_org(props: &[PropRow]) -> bool {
+    // KIND:org or presence of ORG field implies organization
+    if props.iter().any(|p| p.field.eq_ignore_ascii_case("ORG")) {
+        return true;
+    }
+    props.iter().any(|p| p.field.eq_ignore_ascii_case("KIND")
+        && (p.value.eq_ignore_ascii_case("org") || p.value.eq_ignore_ascii_case("organization")))
 }
 
 fn build_tab_fields(
