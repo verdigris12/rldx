@@ -334,6 +334,34 @@ pub fn update_card_field(
     }
 }
 
+pub fn promote_tel_entry(card: &mut Vcard, index: usize) -> bool {
+    if index >= card.tel.len() {
+        return false;
+    }
+
+    if index == 0 {
+        return true;
+    }
+
+    let entry = card.tel.remove(index);
+    card.tel.insert(0, entry);
+    true
+}
+
+pub fn promote_email_entry(card: &mut Vcard, index: usize) -> bool {
+    if index >= card.email.len() {
+        return false;
+    }
+
+    if index == 0 {
+        return true;
+    }
+
+    let entry = card.email.remove(index);
+    card.email.insert(0, entry);
+    true
+}
+
 fn update_tel_value(
     card: &mut Vcard,
     seq: i64,

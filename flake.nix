@@ -22,7 +22,6 @@
             openssl
             sccache
             git just
-            codex
           ] ++ lib.optionals stdenv.isDarwin [ libiconv Security ];
 
 

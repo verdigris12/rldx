@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::io::{stdout, Write};
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
@@ -15,6 +16,7 @@ use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use serde_json::Value;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
+use tui_widgets::popup::PopupState;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -129,6 +131,100 @@ pub enum PaneFocus {
     Detail(DetailTab),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiValueField {
+    Email,
+    Phone,
+}
+
+impl MultiValueField {
+    fn from_field_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "EMAIL" => Some(Self::Email),
+            "TEL" => Some(Self::Phone),
+            _ => None,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Email => "EMAIL ADDRESSES",
+            Self::Phone => "PHONE NUMBERS",
+        }
+    }
+
+    fn field_name(self) -> &'static str {
+        match self {
+            Self::Email => "EMAIL",
+            Self::Phone => "TEL",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiValueItem {
+    pub seq: i64,
+    pub value: String,
+    pub copy_value: String,
+    pub type_label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiValueModal {
+    field: MultiValueField,
+    items: Vec<MultiValueItem>,
+    selected: usize,
+}
+
+impl MultiValueModal {
+    fn new(field: MultiValueField, items: Vec<MultiValueItem>, selected: usize) -> Self {
+        let selected = if items.is_empty() {
+            0
+        } else {
+            selected.min(items.len().saturating_sub(1))
+        };
+        Self {
+            field,
+            items,
+            selected,
+        }
+    }
+
+    pub fn field(&self) -> MultiValueField {
+        self.field
+    }
+
+    pub fn items(&self) -> &[MultiValueItem] {
+        &self.items
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    pub fn selected_item(&self) -> Option<&MultiValueItem> {
+        self.items.get(self.selected)
+    }
+
+    fn select_next(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.items.len();
+    }
+
+    fn select_prev(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        if self.selected == 0 {
+            self.selected = self.items.len() - 1;
+        } else {
+            self.selected -= 1;
+        }
+    }
+}
+
 pub struct App<'a> {
     db: &'a mut Database,
     config: &'a Config,
@@ -154,6 +250,9 @@ pub struct App<'a> {
     image_state: Option<Box<dyn StatefulProtocol>>,
     pub photo_data: Option<PhotoData>,
     pub photo_error: Option<String>,
+    multivalue_modal: Option<MultiValueModal>,
+    // Popup state for modal dialog (tui-widgets popup)
+    pub modal_popup: PopupState,
 }
 
 impl<'a> App<'a> {
@@ -184,6 +283,8 @@ impl<'a> App<'a> {
             image_state: None,
             photo_data: None,
             photo_error: None,
+            multivalue_modal: None,
+            modal_popup: PopupState::default(),
         };
         app.rebuild_search_rows();
         app.load_selection()?;
@@ -242,6 +343,11 @@ impl<'a> App<'a> {
             }
         }
 
+        if self.multivalue_modal.is_some() {
+            self.handle_multivalue_modal_key(key)?;
+            return Ok(false);
+        }
+
         if self.show_search && self.handle_search_key(key)? {
             return Ok(false);
         }
@@ -267,6 +373,12 @@ impl<'a> App<'a> {
         if self.key_matches(&key, &self.config.keys.tab_next) {
             self.advance_field(1);
             return Ok(false);
+        }
+
+        if matches!(key.code, KeyCode::Enter) {
+            if self.open_multivalue_modal_for_current_field() {
+                return Ok(false);
+            }
         }
 
         match key.code {
@@ -359,6 +471,130 @@ impl<'a> App<'a> {
         }
 
         Ok(true)
+    }
+
+    fn handle_multivalue_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.multivalue_modal.is_none() {
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.close_multivalue_modal();
+            }
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'q') => {
+                self.close_multivalue_modal();
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                if let Some(modal) = self.multivalue_modal.as_mut() {
+                    modal.select_next();
+                }
+            }
+            KeyCode::Backspace | KeyCode::BackTab | KeyCode::Up => {
+                if let Some(modal) = self.multivalue_modal.as_mut() {
+                    modal.select_prev();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((field, item)) = self.current_modal_selection() {
+                    if self.set_multivalue_default(field, item.seq)? {
+                        self.rebuild_multivalue_modal(field, None);
+                        self.set_status("Default updated");
+                    }
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some((_, item)) = self.current_modal_selection() {
+                    self.copy_value_to_clipboard(&item.copy_value)?;
+                    self.close_multivalue_modal();
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn current_modal_selection(&self) -> Option<(MultiValueField, MultiValueItem)> {
+        let modal = self.multivalue_modal.as_ref()?;
+        let item = modal.selected_item()?.clone();
+        Some((modal.field(), item))
+    }
+
+    fn close_multivalue_modal(&mut self) {
+        self.multivalue_modal = None;
+    }
+
+    fn open_multivalue_modal_for_current_field(&mut self) -> bool {
+        let Some(field) = self.focused_field() else {
+            return false;
+        };
+
+        let Some(source) = field.source() else {
+            return false;
+        };
+
+        let Some(kind) = MultiValueField::from_field_name(&source.field) else {
+            return false;
+        };
+
+        let items = self.build_multivalue_items(kind);
+        if items.len() < 2 {
+            return false;
+        }
+
+        let selected = items
+            .iter()
+            .position(|item| item.seq == source.seq)
+            .unwrap_or(0);
+        self.multivalue_modal = Some(MultiValueModal::new(kind, items, selected));
+        true
+    }
+
+    fn rebuild_multivalue_modal(&mut self, field: MultiValueField, selected_seq: Option<i64>) {
+        let items = self.build_multivalue_items(field);
+        if items.is_empty() {
+            self.multivalue_modal = None;
+            return;
+        }
+
+        let selected = selected_seq
+            .and_then(|seq| items.iter().position(|item| item.seq == seq))
+            .unwrap_or(0);
+        self.multivalue_modal = Some(MultiValueModal::new(field, items, selected));
+    }
+
+    fn build_multivalue_items(&self, field: MultiValueField) -> Vec<MultiValueItem> {
+        let default_region = self.config.phone_region.as_deref();
+        let field_name = field.field_name();
+        let mut items: Vec<MultiValueItem> = self
+            .current_props
+            .iter()
+            .filter(|prop| prop.field.eq_ignore_ascii_case(field_name))
+            .map(|prop| {
+                let type_label =
+                    extract_type_labels(&prop.params).unwrap_or_else(|| "—".to_string());
+                let (value, copy_value) = match field {
+                    MultiValueField::Email => {
+                        let trimmed = prop.value.trim().to_string();
+                        (trimmed.clone(), trimmed)
+                    }
+                    MultiValueField::Phone => {
+                        let display = vcard_io::phone_display_value(&prop.value, default_region);
+                        (display.clone(), display)
+                    }
+                };
+                MultiValueItem {
+                    seq: prop.seq,
+                    value,
+                    copy_value,
+                    type_label,
+                }
+            })
+            .collect();
+
+        items.sort_by_key(|item| item.seq);
+        items
     }
 
     fn refresh_contacts(&mut self) -> Result<()> {
@@ -674,14 +910,18 @@ impl<'a> App<'a> {
             return Ok(());
         };
 
-        let value = field.copy_text().trim();
-        if value.is_empty() {
+        self.copy_value_to_clipboard(field.copy_text())
+    }
+
+    fn copy_value_to_clipboard(&mut self, value: &str) -> Result<()> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
             self.set_status("Nothing to copy");
             return Ok(());
         }
 
         if let Some(command) = self.config.commands.copy.clone() {
-            match self.run_copy_command(&command, value) {
+            match self.run_copy_command(&command, trimmed) {
                 Ok(_) => self.set_status("Field copied!"),
                 Err(err) => self.set_status(format!("Copy failed: {}", err)),
             }
@@ -737,6 +977,10 @@ impl<'a> App<'a> {
 
     pub fn photo_error(&self) -> Option<&str> {
         self.photo_error.as_deref()
+    }
+
+    pub fn multivalue_modal(&self) -> Option<&MultiValueModal> {
+        self.multivalue_modal.as_ref()
     }
 
     pub fn contact_path_display(&self, path: &Path) -> String {
@@ -812,6 +1056,62 @@ impl<'a> App<'a> {
         }
 
         Ok(())
+    }
+
+    fn set_multivalue_default(&mut self, field: MultiValueField, seq: i64) -> Result<bool> {
+        if seq < 0 {
+            self.set_status("Unable to set default");
+            return Ok(false);
+        }
+
+        let idx = match usize::try_from(seq) {
+            Ok(value) => value,
+            Err(_) => {
+                self.set_status("Unable to set default");
+                return Ok(false);
+            }
+        };
+
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(false);
+        };
+
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() {
+            self.set_status("Contact has no cards");
+            return Ok(false);
+        }
+
+        let updated = {
+            let card = cards.get_mut(0).unwrap();
+            match field {
+                MultiValueField::Email => vcard_io::promote_email_entry(card, idx),
+                MultiValueField::Phone => vcard_io::promote_tel_entry(card, idx),
+            }
+        };
+
+        if !updated {
+            self.set_status("Unable to set default");
+            return Ok(false);
+        }
+
+        vcard_io::write_cards(&contact.path, &cards)?;
+
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        let previous_index = self.card_field_index;
+        self.refresh_contacts()?;
+        if !self.card_fields.is_empty() {
+            let max_index = self.card_fields.len().saturating_sub(1);
+            self.card_field_index = previous_index.min(max_index);
+        }
+
+        Ok(true)
     }
 
     fn key_matches(&self, event: &KeyEvent, binding: &str) -> bool {

@@ -3,14 +3,21 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+};
 use ratatui::{Frame, Terminal};
 use ratatui_image::{Resize, StatefulImage};
+// Use Popup from tui-widgets to render modals
+use tui_widgets::popup::Popup;
 
 use crate::config::RgbColor;
 
 use super::app::{App, PaneField, PaneFocus, SearchRow};
 use super::panes::DetailTab;
+
+const MULTIVALUE_HELP: &str =
+    "TAB/Down: next  Backspace/Up: prev  Space: copy & close  Enter: set default  Q/Esc: close";
 
 pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     terminal.draw(|frame| draw_frame(frame, app))?;
@@ -18,7 +25,7 @@ pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(
 }
 
 fn draw_frame(frame: &mut Frame<'_>, app: &mut App) {
-    let size = frame.size();
+    let size = frame.area();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -31,6 +38,7 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App) {
     draw_header(frame, layout[0], app);
     draw_body(frame, layout[1], app);
     draw_footer(frame, layout[2], app);
+    draw_multivalue_modal(frame, size, app);
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -198,7 +206,7 @@ fn draw_search_header(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool
         frame.render_widget(Paragraph::new(line.clone()), area);
         if let Some(column) = cursor_column {
             let x = area.x.saturating_add(column as u16);
-            frame.set_cursor(x, area.y);
+        frame.set_cursor_position((x, area.y));
         }
         return;
     }
@@ -212,7 +220,7 @@ fn draw_search_header(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool
 
     if let Some(column) = cursor_column {
         let x = parts[0].x.saturating_add(column as u16);
-        frame.set_cursor(x, parts[0].y);
+        frame.set_cursor_position((x, parts[0].y));
     }
 
     let separator = "═".repeat(parts[1].width as usize);
@@ -298,7 +306,74 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if let Some((line_idx, column)) = cursor {
         let x = layout[1].x.saturating_add(column as u16);
         let y = layout[1].y.saturating_add(line_idx as u16);
-        frame.set_cursor(x, y);
+        frame.set_cursor_position((x, y));
+    }
+}
+
+fn draw_multivalue_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if app.multivalue_modal().is_none() {
+        return;
+    }
+
+    let mut width = area.width.saturating_mul(2).saturating_div(3);
+    let min_width = area.width.min(30);
+    if width < min_width {
+        width = min_width;
+    }
+    if width > area.width {
+        width = area.width;
+    }
+
+    // Popup content size is derived from computed width
+
+    let header =
+        Row::new(vec![Cell::from("VALUE"), Cell::from("TYPE")]).style(header_text_style(app));
+
+    // Prepare table data from modal before mutable borrow of popup state
+    let (field_title, selected_index, rows, items_len) = {
+        let m = app.multivalue_modal().unwrap();
+        let rows: Vec<Row> = m
+            .items()
+            .iter()
+            .map(|item| {
+                Row::new(vec![
+                    Cell::from(item.value.clone()),
+                    Cell::from(item.type_label.clone()),
+                ])
+            })
+            .collect();
+        (m.field().title(), m.selected(), rows, m.items().len())
+    };
+
+    let widths = [Constraint::Percentage(70), Constraint::Percentage(30)];
+    let table = Table::new(rows, widths)
+        .header(header)
+        .highlight_style(selection_style(app));
+
+    // Build popup body placeholder sized to content area (width/height exclude borders)
+    let content_width = width.saturating_sub(2) as usize;
+    let content_height = items_len.saturating_add(1); // header + items
+    let body_lines: Vec<Line> = (0..content_height)
+        .map(|_| Line::from(" ".repeat(content_width)))
+        .collect();
+    let body_text = ratatui::text::Text::from(body_lines);
+
+    let title_line = Line::from(Span::styled(field_title, header_text_style(app)));
+    let popup = Popup::new(body_text)
+        .title(title_line)
+        .border_style(border_style(app, true));
+
+    // Render popup using state so we can retrieve its area
+    frame.render_stateful_widget_ref(popup, area, &mut app.modal_popup);
+
+    if let Some(area) = app.modal_popup.area() {
+        // Compute inner area (content area) based on borders
+        let inner = Block::default().borders(Borders::ALL).inner(*area);
+        if inner.width > 0 && inner.height > 0 {
+            let mut state = TableState::default();
+            state.select(Some(selected_index));
+            frame.render_stateful_widget(table, inner, &mut state);
+        }
     }
 }
 
@@ -443,12 +518,16 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if let Some((line_idx, column)) = cursor {
         let x = layout[1].x.saturating_add(column as u16);
         let y = layout[1].y.saturating_add(line_idx as u16);
-        frame.set_cursor(x, y);
+        frame.set_cursor_position((x, y));
     }
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let message = app.status.as_deref().unwrap_or("READY");
+    let message = if app.multivalue_modal().is_some() {
+        MULTIVALUE_HELP
+    } else {
+        app.status.as_deref().unwrap_or("READY")
+    };
     let colors = app.ui_colors();
     let style = Style::default()
         .fg(color(colors.status_fg))
