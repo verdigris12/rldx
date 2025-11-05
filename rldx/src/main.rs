@@ -107,7 +107,15 @@ fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
 fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
     let files = vdir::list_vcf_files(&config.vdir)?;
     let paths_set: HashSet<_> = files.iter().cloned().collect();
-    let stored = db.stored_items()?;
+    if force {
+        db.clear_all()?;
+    }
+    let stored = if force {
+        // Treat as empty to force full rebuild
+        Default::default()
+    } else {
+        db.stored_items()?
+    };
 
     for path in files {
         let mut state = vdir::compute_file_state(&path)?;
