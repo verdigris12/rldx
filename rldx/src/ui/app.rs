@@ -232,6 +232,7 @@ pub struct App<'a> {
     pub selected: usize,
     pub search_input: Input,
     pub show_search: bool,
+    pub search_focus: SearchFocus,
     pub current_contact: Option<ContactItem>,
     pub current_props: Vec<PropRow>,
     pub tab: DetailTab,
@@ -265,6 +266,7 @@ impl<'a> App<'a> {
             selected: 0,
             search_input: Input::default(),
             show_search: true,
+            search_focus: SearchFocus::Input,
             current_contact: None,
             current_props: Vec::new(),
             tab: DetailTab::Work,
@@ -358,15 +360,12 @@ impl<'a> App<'a> {
             return Ok(true);
         }
 
-        if self.show_search && self.key_matches(&key, &self.config.keys.confirm) {
-            self.focus_pane(PaneFocus::Card);
-            self.refresh_contacts()?;
-            return Ok(false);
-        }
+        // When search is open, Enter behavior is handled inside handle_search_key
 
         if self.key_matches(&key, &self.config.keys.toggle_search) {
             self.show_search = true;
             self.focused_pane = PaneFocus::Search;
+            self.search_focus = SearchFocus::Input;
             return Ok(false);
         }
 
@@ -428,20 +427,80 @@ impl<'a> App<'a> {
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if matches!(key.code, KeyCode::Esc) {
-            self.show_search = false;
-            self.refresh_contacts()?;
-            return Ok(true);
-        }
+        match self.search_focus {
+            SearchFocus::Input => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.show_search = false;
+                        self.refresh_contacts()?;
+                        return Ok(true);
+                    }
+                    KeyCode::Enter => {
+                        // Move focus to results list
+                        self.search_focus = SearchFocus::Results;
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
 
-        if let Some(change) = self.search_input.handle_event(&Event::Key(key)) {
-            if change.value {
-                self.refresh_contacts()?;
+                if let Some(change) = self.search_input.handle_event(&Event::Key(key)) {
+                    if change.value {
+                        self.refresh_contacts()?;
+                    }
+                    return Ok(true);
+                }
+                Ok(false)
             }
-            return Ok(true);
-        }
+            SearchFocus::Results => {
+                // '/' refocuses input
+                if self.key_matches(&key, &self.config.keys.toggle_search) {
+                    self.search_focus = SearchFocus::Input;
+                    return Ok(true);
+                }
 
-        Ok(false)
+                match key.code {
+                    KeyCode::Esc => {
+                        self.show_search = false;
+                        self.refresh_contacts()?;
+                        return Ok(true);
+                    }
+                    KeyCode::Enter => {
+                        self.show_search = false;
+                        self.refresh_contacts()?;
+                        return Ok(true);
+                    }
+                    KeyCode::Up => {
+                        self.move_selection(-1)?;
+                        return Ok(true);
+                    }
+                    KeyCode::Down => {
+                        self.move_selection(1)?;
+                        return Ok(true);
+                    }
+                    KeyCode::Tab => {
+                        self.move_selection(1)?;
+                        return Ok(true);
+                    }
+                    KeyCode::Backspace | KeyCode::BackTab => {
+                        self.move_selection(-1)?;
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+
+                // Also support configured next/prev keys while in results
+                if self.key_matches(&key, &self.config.keys.next) {
+                    self.move_selection(1)?;
+                    return Ok(true);
+                }
+                if self.key_matches(&key, &self.config.keys.prev) {
+                    self.move_selection(-1)?;
+                    return Ok(true);
+                }
+
+                Ok(false)
+            }
+        }
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -1739,4 +1798,9 @@ fn name_components(value: &str) -> Vec<String> {
         components.push("".to_string());
     }
     components
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFocus {
+    Input,
+    Results,
 }

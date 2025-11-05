@@ -13,7 +13,7 @@ use tui_widgets::popup::Popup;
 
 use crate::config::RgbColor;
 
-use super::app::{App, PaneField, PaneFocus, SearchRow};
+use super::app::{App, PaneField, PaneFocus, SearchFocus, SearchRow};
 use super::panes::DetailTab;
 
 const MULTIVALUE_HELP: &str =
@@ -157,7 +157,8 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 }
 
 fn draw_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let active = matches!(app.focused_pane, PaneFocus::Search);
+    let active = matches!(app.focused_pane, PaneFocus::Search)
+        && matches!(app.search_focus, SearchFocus::Input);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(app, active));
