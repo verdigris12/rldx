@@ -178,6 +178,11 @@ pub struct ConfirmModal {
 }
 
 #[derive(Debug, Clone)]
+pub struct AliasModal {
+    pub input: Input,
+}
+
+#[derive(Debug, Clone)]
 pub struct MultiValueModal {
     field: MultiValueField,
     items: Vec<MultiValueItem>,
@@ -268,6 +273,8 @@ pub struct App<'a> {
     pub modal_popup: PopupState,
     // Merge confirmation modal
     pub confirm_modal: Option<ConfirmModal>,
+    // Add-alias modal
+    pub alias_modal: Option<AliasModal>,
 }
 
 impl<'a> App<'a> {
@@ -304,6 +311,7 @@ impl<'a> App<'a> {
             multivalue_modal: None,
             modal_popup: PopupState::default(),
             confirm_modal: None,
+            alias_modal: None,
         };
         app.rebuild_search_rows();
         app.load_selection()?;
@@ -364,6 +372,11 @@ impl<'a> App<'a> {
 
         if self.confirm_modal.is_some() {
             self.handle_confirm_modal_key(key)?;
+            return Ok(false);
+        }
+
+        if self.alias_modal.is_some() {
+            self.handle_alias_modal_key(key)?;
             return Ok(false);
         }
 
@@ -433,6 +446,14 @@ impl<'a> App<'a> {
                     self.move_selection(-1)?;
                 } else if self.key_matches(&key, &self.config.keys.edit) {
                     self.begin_edit();
+                } else if matches!(c, 'a' | 'A') {
+                    // Open Add Alias modal only when ALIAS field is focused
+                    if let Some(field) = self.focused_field() {
+                        if field.label.eq_ignore_ascii_case("ALIAS") {
+                            self.alias_modal = Some(AliasModal { input: Input::default() });
+                            self.set_status("Add alias");
+                        }
+                    }
                 } else if self.key_matches(&key, &self.config.keys.photo_fetch) {
                     self.set_status("Image fetch is not yet implemented");
                 } else if self.key_matches(&key, &self.config.keys.lang_next) {
@@ -806,6 +827,32 @@ impl<'a> App<'a> {
             _ => {}
         }
 
+        Ok(())
+    }
+
+    fn handle_alias_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(modal) = self.alias_modal.as_mut() else { return Ok(()); };
+
+        match key.code {
+            KeyCode::Esc => {
+                self.alias_modal = None;
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                let value = modal.input.value().trim().to_string();
+                self.alias_modal = None;
+                if value.is_empty() {
+                    return Ok(());
+                }
+                self.add_alias_to_current_contact(&value)?;
+                self.set_status("Alias added");
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Route to inline input
+        let _ = modal.input.handle_event(&Event::Key(key));
         Ok(())
     }
 
@@ -1333,6 +1380,48 @@ impl<'a> App<'a> {
         } else {
             self.set_status("Nothing to edit");
         }
+    }
+
+    fn add_alias_to_current_contact(&mut self, alias: &str) -> Result<()> {
+        let Some(contact) = &self.current_contact else { return Ok(()); };
+        let trimmed = alias.trim();
+        if trimmed.is_empty() { return Ok(()); }
+
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() { return Ok(()); }
+
+        {
+            let card = cards.get_mut(0).unwrap();
+            let exists = card
+                .nickname
+                .iter()
+                .any(|p| p.value.eq_ignore_ascii_case(trimmed));
+            if !exists {
+                card.nickname.push(TextProperty {
+                    group: None,
+                    value: trimmed.to_string(),
+                    parameters: None,
+                });
+            }
+        }
+
+        vcard_io::write_cards(&contact.path, &cards)?;
+
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        // Refresh and keep focus stable
+        let previous_index = self.card_field_index;
+        self.refresh_contacts()?;
+        if !self.card_fields.is_empty() {
+            let max_index = self.card_fields.len().saturating_sub(1);
+            self.card_field_index = previous_index.min(max_index);
+        }
+
+        Ok(())
     }
 
     fn commit_field_edit(&mut self, target: FieldRef, new_value: String) -> Result<()> {

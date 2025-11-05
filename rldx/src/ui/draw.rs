@@ -20,6 +20,7 @@ const MULTIVALUE_HELP: &str =
     "TAB/Down: next  Backspace/Up: prev  Space: copy & close  Enter: set default  E: edit  Q/Esc: close";
 const SEARCH_HELP_INPUT: &str =
     "Type to filter  Esc: focus results  Enter: open";
+const ADD_ALIAS_HELP: &str = "Type alias  Enter: add  Esc: cancel";
 
 pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     terminal.draw(|frame| draw_frame(frame, app))?;
@@ -40,6 +41,7 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App) {
     draw_header(frame, layout[0], app);
     draw_body(frame, layout[1], app);
     draw_footer(frame, layout[2], app);
+    draw_alias_modal(frame, size, app);
     draw_multivalue_modal(frame, size, app);
     draw_confirm_modal(frame, size, app);
 }
@@ -597,7 +599,9 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let message: String = if app.multivalue_modal().is_some() {
+    let message: String = if app.alias_modal.is_some() {
+        ADD_ALIAS_HELP.to_string()
+    } else if app.multivalue_modal().is_some() {
         MULTIVALUE_HELP.to_string()
     } else if app.confirm_modal.is_some() {
         CONFIRM_HELP.to_string()
@@ -624,6 +628,60 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(background, area);
 
     frame.render_widget(Paragraph::new(message).style(style), area);
+}
+
+fn draw_alias_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if app.alias_modal.is_none() { return; }
+
+    let mut width = area.width.saturating_mul(2).saturating_div(3);
+    let min_width = area.width.min(30);
+    if width < min_width { width = min_width; }
+    if width > area.width { width = area.width; }
+
+    let content_width = width.saturating_sub(2) as usize;
+
+    let label = "ALIAS: ";
+    let value = app
+        .alias_modal
+        .as_ref()
+        .map(|m| m.input.value().to_string())
+        .unwrap_or_default();
+    let line = Line::from(vec![
+        Span::styled(label, header_text_style(app)),
+        Span::raw(value.clone()),
+    ]);
+    let lines = vec![
+        line,
+        Line::from("".to_string()),
+        Line::from(ADD_ALIAS_HELP.to_string()),
+    ];
+
+    let body_text = ratatui::text::Text::from(
+        lines
+            .into_iter()
+            .map(|l| {
+                let ln = l;
+                if ln.width() < content_width { /* let popup size itself */ }
+                ln
+            })
+            .collect::<Vec<Line>>()
+    );
+
+    let title_line = Line::from(Span::styled("ADD ALIAS", header_text_style(app)));
+    let popup = Popup::new(body_text)
+        .title(title_line)
+        .border_style(border_style(app, true));
+
+    frame.render_stateful_widget_ref(popup, area, &mut app.modal_popup);
+
+    if let Some(area) = app.modal_popup.area() {
+        let inner = Block::default().borders(Borders::ALL).inner(*area);
+        if let Some(m) = app.alias_modal.as_ref() {
+            let x = inner.x.saturating_add(label.len() as u16 + m.input.visual_cursor() as u16);
+            let y = inner.y;
+            frame.set_cursor_position((x, y));
+        }
+    }
 }
 
 fn build_tab_header(app: &App) -> Line<'static> {
