@@ -218,6 +218,23 @@ impl Database {
         Ok(())
     }
 
+    pub fn delete_items_by_paths<I>(&mut self, paths: I) -> Result<()>
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut stmt = tx.prepare("DELETE FROM items WHERE path = ?1")?;
+            for path in paths {
+                let _ = stmt.execute(params![path.to_string_lossy()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_contacts(&self, filter: Option<&str>) -> Result<Vec<ContactListEntry>> {
         let mut sql = String::from(
             "SELECT uuid, fn, path,
