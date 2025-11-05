@@ -478,7 +478,7 @@ impl<'a> App<'a> {
                 }
 
                 match key.code {
-                    KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Toggle between results and marked-only view
                         self.show_marked_only = !self.show_marked_only;
                         if self.show_marked_only {
