@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::io::{stdout, Write};
 use std::path::{Component, Path};
@@ -247,6 +248,10 @@ pub struct App<'a> {
     pub tab_field_indices: [usize; DetailTab::COUNT],
     pub search_rows: Vec<SearchRow>,
     pub selected_row: Option<usize>,
+    // Marked contacts by UUID
+    pub marked: HashSet<String>,
+    // When true, the search pane shows only marked contacts
+    pub show_marked_only: bool,
     image_picker: Picker,
     image_state: Option<Box<dyn StatefulProtocol>>,
     pub photo_data: Option<PhotoData>,
@@ -281,6 +286,8 @@ impl<'a> App<'a> {
             tab_field_indices: [0; DetailTab::COUNT],
             search_rows: Vec::new(),
             selected_row: None,
+            marked: HashSet::new(),
+            show_marked_only: false,
             image_picker: create_image_picker(),
             image_state: None,
             photo_data: None,
@@ -471,6 +478,26 @@ impl<'a> App<'a> {
                 }
 
                 match key.code {
+                    KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        // Toggle between results and marked-only view
+                        self.show_marked_only = !self.show_marked_only;
+                        if self.show_marked_only {
+                            self.rebuild_marked_contacts()?;
+                        } else {
+                            self.refresh_contacts()?;
+                        }
+                        return Ok(true);
+                    }
+                    KeyCode::Char(' ') => {
+                        self.toggle_mark_current();
+                        // If viewing marked-only, update the list immediately
+                        if self.show_marked_only {
+                            self.rebuild_marked_contacts()?;
+                        } else {
+                            self.rebuild_search_rows();
+                        }
+                        return Ok(true);
+                    }
                     KeyCode::Esc => {
                         self.show_search = false;
                         self.refresh_contacts()?;
@@ -513,6 +540,50 @@ impl<'a> App<'a> {
                 Ok(false)
             }
         }
+    }
+
+    fn toggle_mark_current(&mut self) {
+        if let Some(uuid) = self
+            .contacts
+            .get(self.selected)
+            .map(|entry| entry.uuid.clone())
+        {
+            if !uuid.is_empty() {
+                if !self.marked.insert(uuid.clone()) {
+                    // already present, remove it
+                    self.marked.remove(&uuid);
+                    self.set_status("Unmarked");
+                } else {
+                    self.set_status("Marked");
+                }
+            }
+        }
+    }
+
+    fn rebuild_marked_contacts(&mut self) -> Result<()> {
+        // load all contacts and filter to marked
+        let all = self.db.list_contacts(None)?;
+        self.contacts = all
+            .into_iter()
+            .filter(|c| self.marked.contains(&c.uuid))
+            .collect();
+        self.sort_contacts();
+
+        if self.selected >= self.contacts.len() {
+            self.selected = self.contacts.len().saturating_sub(1);
+        }
+
+        self.rebuild_search_rows();
+        if self.contacts.is_empty() {
+            self.current_contact = None;
+            self.current_props.clear();
+            self.aliases.clear();
+            self.languages.clear();
+            self.rebuild_field_views();
+        } else {
+            self.load_selection()?;
+        }
+        Ok(())
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) -> Result<bool> {
