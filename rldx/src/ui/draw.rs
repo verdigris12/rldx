@@ -18,6 +18,10 @@ use super::panes::DetailTab;
 
 const MULTIVALUE_HELP: &str =
     "TAB/Down: next  Backspace/Up: prev  Space: copy & close  Enter: set default  Q/Esc: close";
+const SEARCH_HELP_INPUT: &str =
+    "Type to filter  Enter: focus results  Esc: close";
+const SEARCH_HELP_RESULTS: &str =
+    "Up/Down/Tab/Backspace: move  /: focus search  Enter: close  Esc: close";
 
 pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     terminal.draw(|frame| draw_frame(frame, app))?;
@@ -526,6 +530,11 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let message = if app.multivalue_modal().is_some() {
         MULTIVALUE_HELP
+    } else if app.show_search {
+        match app.search_focus {
+            SearchFocus::Input => SEARCH_HELP_INPUT,
+            SearchFocus::Results => SEARCH_HELP_RESULTS,
+        }
     } else {
         app.status.as_deref().unwrap_or("READY")
     };
