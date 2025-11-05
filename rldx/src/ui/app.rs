@@ -138,7 +138,7 @@ pub enum MultiValueField {
 }
 
 impl MultiValueField {
-    fn from_field_name(name: &str) -> Option<Self> {
+    pub fn from_field_name(name: &str) -> Option<Self> {
         match name.to_ascii_uppercase().as_str() {
             "EMAIL" => Some(Self::Email),
             "TEL" => Some(Self::Phone),
@@ -549,6 +549,37 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
+        // When editing inline inside the modal
+        if self.editor.active {
+            match key.code {
+                KeyCode::Esc => {
+                    // Cancel editing but keep modal open
+                    self.editor.cancel();
+                    self.set_status("Edit cancelled");
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if let Some(target) = self.editor.target().cloned() {
+                        let value = self.editor.value().to_string();
+                        self.editor.cancel();
+                        self.commit_field_edit(target.clone(), value)?;
+                        // Keep the modal open and rebuild it for the same field, keep selection
+                        if let Some(field) = MultiValueField::from_field_name(&target.field) {
+                            self.rebuild_multivalue_modal(field, Some(target.seq));
+                        }
+                        self.set_status("Field updated");
+                        return Ok(());
+                    }
+                }
+                _ => {
+                    // Route other keys to the inline editor; if it handled, stop here
+                    if self.editor.handle_key_event(key) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.close_multivalue_modal();
@@ -558,29 +589,10 @@ impl<'a> App<'a> {
             }
             KeyCode::Char(c) if c.eq_ignore_ascii_case(&'e') => {
                 if let Some((field, item)) = self.current_modal_selection() {
-                    // Promote to default so it appears in the card pane, then begin editing
-                    if self.set_multivalue_default(field, item.seq)? {
-                        // Focus card pane and move focus to the corresponding PHONE/EMAIL field
-                        self.focus_pane(PaneFocus::Card);
-                        if let Some((idx, pf)) = self
-                            .card_fields
-                            .iter()
-                            .enumerate()
-                            .find(|(_, f)| {
-                                f.source()
-                                    .map(|s| s.field.eq_ignore_ascii_case(field.field_name()))
-                                    .unwrap_or(false)
-                            })
-                        {
-                            self.card_field_index = idx;
-                            // Start inline edit for this field
-                            if let Some(source) = pf.source() {
-                                self.editor.start(pf.copy_text(), source);
-                                self.set_status(format!("Editing {}", pf.label));
-                            }
-                        }
-                        self.close_multivalue_modal();
-                    }
+                    // Start inline edit for the selected item within the modal
+                    let target = FieldRef::new(field.field_name(), item.seq);
+                    self.editor.start(&item.value, target);
+                    self.set_status(format!("Editing {}", field.field_name()));
                 }
             }
             KeyCode::Tab | KeyCode::Down => {

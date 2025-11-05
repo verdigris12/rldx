@@ -13,7 +13,7 @@ use tui_widgets::popup::Popup;
 
 use crate::config::RgbColor;
 
-use super::app::{App, PaneField, PaneFocus, SearchFocus, SearchRow};
+use super::app::{App, MultiValueField, PaneField, PaneFocus, SearchFocus, SearchRow};
 use super::panes::DetailTab;
 
 const MULTIVALUE_HELP: &str =
@@ -334,20 +334,41 @@ fn draw_multivalue_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let header =
         Row::new(vec![Cell::from("VALUE"), Cell::from("TYPE")]).style(header_text_style(app));
 
-    // Prepare table data from modal before mutable borrow of popup state
-    let (field_title, selected_index, rows, items_len) = {
+    // Prepare table data and context before mutable borrow of popup state
+    let (field_title, selected_index, items_len, rows) = {
         let m = app.multivalue_modal().unwrap();
-        let rows: Vec<Row> = m
-            .items()
+        let selected_index = m.selected();
+        let field = m.field();
+        let items = m.items();
+
+        let editing_for_selected = if app.editor.active {
+            if let Some(target) = app.editor.target() {
+                if let Some(f) = MultiValueField::from_field_name(&target.field) {
+                    f == field && (target.seq as usize) == selected_index
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let rows: Vec<Row> = items
             .iter()
-            .map(|item| {
-                Row::new(vec![
-                    Cell::from(item.value.clone()),
-                    Cell::from(item.type_label.clone()),
-                ])
+            .enumerate()
+            .map(|(idx, item)| {
+                let value_cell = if editing_for_selected && idx == selected_index {
+                    Cell::from(app.editor.value().to_string())
+                } else {
+                    Cell::from(item.value.clone())
+                };
+                Row::new(vec![value_cell, Cell::from(item.type_label.clone())])
             })
             .collect();
-        (m.field().title(), m.selected(), rows, m.items().len())
+
+        (field.title(), selected_index, items.len(), rows)
     };
 
     let widths = [Constraint::Percentage(70), Constraint::Percentage(30)];
@@ -378,6 +399,21 @@ fn draw_multivalue_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             let mut state = TableState::default();
             state.select(Some(selected_index));
             frame.render_stateful_widget(table, inner, &mut state);
+            // If editing inline, place cursor in the value cell of the selected row
+            if app.editor.active {
+                if let Some(target) = app.editor.target() {
+                    if let Some(field) = MultiValueField::from_field_name(&target.field) {
+                        if field_title.eq(field.title()) {
+                            let cursor_x = inner.x.saturating_add(app.editor.visual_cursor() as u16);
+                            let cursor_y = inner
+                                .y
+                                .saturating_add(1) // header row offset
+                                .saturating_add(selected_index as u16);
+                            frame.set_cursor_position((cursor_x, cursor_y));
+                        }
+                    }
+                }
+            }
         }
     }
 }
