@@ -569,9 +569,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             SearchFocus::Input => SEARCH_HELP_INPUT.to_string(),
             SearchFocus::Results => {
                 if app.show_marked_only {
-                    "Space: unmark  Ctrl+M: show search results  /: focus search  Enter: close  Esc: close".to_string()
+                    "Space: unmark  M: show search results  /: focus search  Enter: close  Esc: close".to_string()
                 } else {
-                    "Space: mark  Ctrl+M: show marked only  /: focus search  Enter: close  Esc: close".to_string()
+                    "Space: mark  M: show marked only  /: focus search  Enter: close  Esc: close".to_string()
                 }
             }
         }

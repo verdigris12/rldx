@@ -478,7 +478,8 @@ impl<'a> App<'a> {
                 }
 
                 match key.code {
-                    KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Use plain 'm' to avoid Ctrl+M being mapped to Enter by terminals
+                    KeyCode::Char('m') => {
                         // Toggle between results and marked-only view
                         self.show_marked_only = !self.show_marked_only;
                         if self.show_marked_only {
