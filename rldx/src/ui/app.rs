@@ -172,6 +172,12 @@ pub struct MultiValueItem {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConfirmModal {
+    pub title: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct MultiValueModal {
     field: MultiValueField,
     items: Vec<MultiValueItem>,
@@ -260,6 +266,8 @@ pub struct App<'a> {
     multivalue_modal: Option<MultiValueModal>,
     // Popup state for modal dialog (tui-widgets popup)
     pub modal_popup: PopupState,
+    // Merge confirmation modal
+    pub confirm_modal: Option<ConfirmModal>,
 }
 
 impl<'a> App<'a> {
@@ -295,6 +303,7 @@ impl<'a> App<'a> {
             photo_error: None,
             multivalue_modal: None,
             modal_popup: PopupState::default(),
+            confirm_modal: None,
         };
         app.rebuild_search_rows();
         app.load_selection()?;
@@ -351,6 +360,11 @@ impl<'a> App<'a> {
             if self.handle_editor_key(key)? {
                 return Ok(false);
             }
+        }
+
+        if self.confirm_modal.is_some() {
+            self.handle_confirm_modal_key(key)?;
+            return Ok(false);
         }
 
         if self.multivalue_modal.is_some() {
@@ -482,8 +496,19 @@ impl<'a> App<'a> {
 
                 match key.code {
                     KeyCode::Char('m') => {
-                        // Merge marked contacts
-                        self.merge_marked_contacts()?;
+                        // Open confirmation modal for merge
+                        let count = self.marked.len();
+                        if count < 2 {
+                            self.set_status("Mark at least 2 contacts to merge");
+                            return Ok(true);
+                        }
+                        self.confirm_modal = Some(ConfirmModal {
+                            title: "MERGE CONTACTS".to_string(),
+                            message: format!(
+                                "Merge {} marked contacts into a single card?",
+                                count
+                            ),
+                        });
                         return Ok(true);
                     }
                     // Use plain 'm' to avoid Ctrl+M being mapped to Enter by terminals
@@ -777,6 +802,32 @@ impl<'a> App<'a> {
                     self.copy_value_to_clipboard(&item.copy_value)?;
                     self.close_multivalue_modal();
                 }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_confirm_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.confirm_modal.is_none() {
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.confirm_modal = None;
+            }
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'n') || c.eq_ignore_ascii_case(&'q') => {
+                self.confirm_modal = None;
+            }
+            KeyCode::Enter => {
+                self.confirm_modal = None;
+                self.merge_marked_contacts()?;
+            }
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => {
+                self.confirm_modal = None;
+                self.merge_marked_contacts()?;
             }
             _ => {}
         }

@@ -41,6 +41,7 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App) {
     draw_body(frame, layout[1], app);
     draw_footer(frame, layout[2], app);
     draw_multivalue_modal(frame, size, app);
+    draw_confirm_modal(frame, size, app);
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -416,6 +417,40 @@ fn draw_multivalue_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
 }
 
+fn draw_confirm_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let Some(modal) = app.confirm_modal.as_ref() else { return; };
+
+    let mut width = area.width.saturating_mul(2).saturating_div(3);
+    let min_width = area.width.min(30);
+    if width < min_width { width = min_width; }
+    if width > area.width { width = area.width; }
+
+    let content_width = width.saturating_sub(2) as usize;
+    let lines = vec![
+        Line::from(modal.message.clone()),
+        Line::from("".to_string()),
+        Line::from(CONFIRM_HELP.to_string()),
+    ];
+    let body_text = ratatui::text::Text::from(
+        lines
+            .into_iter()
+            .map(|line| {
+                // Ensure we allocate at least content width to avoid tiny popup
+                let mut l = line;
+                if l.width() < content_width { /* leave as is; Popup sizes itself */ }
+                l
+            })
+            .collect::<Vec<Line>>(),
+    );
+
+    let title_line = Line::from(Span::styled(modal.title.clone(), header_text_style(app)));
+    let popup = Popup::new(body_text)
+        .title(title_line)
+        .border_style(border_style(app, true));
+
+    frame.render_stateful_widget_ref(popup, area, &mut app.modal_popup);
+}
+
 fn draw_image(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -564,6 +599,8 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let message: String = if app.multivalue_modal().is_some() {
         MULTIVALUE_HELP.to_string()
+    } else if app.confirm_modal.is_some() {
+        CONFIRM_HELP.to_string()
     } else if app.show_search {
         match app.search_focus {
             SearchFocus::Input => SEARCH_HELP_INPUT.to_string(),
@@ -747,3 +784,4 @@ fn render_header_with_double_line(
 fn color(rgb: RgbColor) -> Color {
     Color::Rgb(rgb.r, rgb.g, rgb.b)
 }
+const CONFIRM_HELP: &str = "Y/Enter: confirm  N/Esc: cancel";
