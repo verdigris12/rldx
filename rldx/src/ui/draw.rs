@@ -19,7 +19,7 @@ use super::panes::DetailTab;
 const MULTIVALUE_HELP: &str =
     "TAB/Down: next  Backspace/Up: prev  Space: copy & close  Enter: set default  E: edit  Q/Esc: close";
 const SEARCH_HELP_INPUT: &str =
-    "Type to filter  Enter: focus results  Esc: close";
+    "Type to filter  Esc: focus results  Enter: open";
 
 pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     terminal.draw(|frame| draw_frame(frame, app))?;
@@ -569,9 +569,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             SearchFocus::Input => SEARCH_HELP_INPUT.to_string(),
             SearchFocus::Results => {
                 if app.show_marked_only {
-                    "Space: unmark  M: show search results  /: focus search  Enter: close  Esc: close".to_string()
+                    "Space: unmark  M: show search results  /: focus search  Enter: open & close search  Esc: close".to_string()
                 } else {
-                    "Space: mark  M: show marked only  /: focus search  Enter: close  Esc: close".to_string()
+                    "Space: mark  M: show marked only  /: focus search  Enter: open & close search  Esc: close".to_string()
                 }
             }
         }

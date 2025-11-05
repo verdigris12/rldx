@@ -450,13 +450,15 @@ impl<'a> App<'a> {
             SearchFocus::Input => {
                 match key.code {
                     KeyCode::Esc => {
-                        self.show_search = false;
-                        self.refresh_contacts()?;
+                        // Move focus to results (do not close search)
+                        self.search_focus = SearchFocus::Results;
                         return Ok(true);
                     }
                     KeyCode::Enter => {
-                        // Move focus to results list
-                        self.search_focus = SearchFocus::Results;
+                        // Open selected contact (keep filter), collapse search
+                        self.show_search = false;
+                        self.focus_pane(PaneFocus::Card);
+                        self.refresh_contacts()?;
                         return Ok(true);
                     }
                     _ => {}
@@ -505,7 +507,9 @@ impl<'a> App<'a> {
                         return Ok(true);
                     }
                     KeyCode::Enter => {
+                        // Open selected contact and collapse search
                         self.show_search = false;
+                        self.focus_pane(PaneFocus::Card);
                         self.refresh_contacts()?;
                         return Ok(true);
                     }
