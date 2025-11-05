@@ -417,8 +417,20 @@ impl<'a> App<'a> {
                     self.set_status("Language toggle not yet implemented");
                 }
             }
-            KeyCode::Down => self.move_selection(1)?,
-            KeyCode::Up => self.move_selection(-1)?,
+            KeyCode::Down => {
+                if self.show_search {
+                    self.move_selection(1)?;
+                } else {
+                    self.advance_field(1);
+                }
+            }
+            KeyCode::Up => {
+                if self.show_search {
+                    self.move_selection(-1)?;
+                } else {
+                    self.advance_field(-1);
+                }
+            }
             KeyCode::PageDown => self.move_selection(5)?,
             KeyCode::PageUp => self.move_selection(-5)?,
             _ => {}
