@@ -111,10 +111,8 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_items_fn ON items(fn);
-            CREATE INDEX IF NOT EXISTS idx_items_fn_norm ON items(fn_norm);
             CREATE INDEX IF NOT EXISTS idx_props_field ON props(field);
             CREATE INDEX IF NOT EXISTS idx_props_value ON props(value);
-            CREATE INDEX IF NOT EXISTS idx_props_value_norm ON props(value_norm);
             CREATE INDEX IF NOT EXISTS idx_props_fn ON props(fn);
         "#,
         )?;
@@ -122,6 +120,13 @@ impl Database {
         // Migration for existing DBs: ensure columns exist and backfill
         self.ensure_norm_columns()?;
         self.backfill_norm_columns()?;
+        // Create indexes that depend on newly added columns
+        self.conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_items_fn_norm ON items(fn_norm);
+            CREATE INDEX IF NOT EXISTS idx_props_value_norm ON props(value_norm);
+            "#,
+        )?;
         Ok(())
     }
 

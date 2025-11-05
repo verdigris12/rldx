@@ -436,7 +436,7 @@ fn draw_confirm_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             .into_iter()
             .map(|line| {
                 // Ensure we allocate at least content width to avoid tiny popup
-                let mut l = line;
+                let l = line;
                 if l.width() < content_width { /* leave as is; Popup sizes itself */ }
                 l
             })
