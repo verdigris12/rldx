@@ -853,12 +853,16 @@ impl<'a> App<'a> {
             let depth = chain.len() as u16;
             last_chain = chain.clone();
 
-            let icon = if contact_is_org(contact) {
-                &self.config.ui.icons.organization
+            let text = if self.marked.contains(&contact.uuid) {
+                format!("★ {}", contact.display_fn.to_uppercase())
             } else {
-                &self.config.ui.icons.contact
+                let icon = if contact_is_org(contact) {
+                    &self.config.ui.icons.organization
+                } else {
+                    &self.config.ui.icons.contact
+                };
+                format!("{}{}", icon, contact.display_fn.to_uppercase())
             };
-            let text = format!("{}{}", icon, contact.display_fn.to_uppercase());
             self.search_rows.push(SearchRow {
                 text,
                 depth,
