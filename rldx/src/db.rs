@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, Row, TransactionBehavior};
 use serde_json::Value;
 
 use crate::search;
@@ -90,6 +90,7 @@ impl Database {
               uuid TEXT PRIMARY KEY,
               path TEXT UNIQUE NOT NULL,
               fn   TEXT NOT NULL,
+              fn_norm TEXT,
               rev  TEXT,
               has_photo INTEGER NOT NULL DEFAULT 0,
               has_logo  INTEGER NOT NULL DEFAULT 0,
@@ -103,17 +104,115 @@ impl Database {
               fn    TEXT NOT NULL,
               field TEXT NOT NULL,
               value TEXT NOT NULL,
+              value_norm TEXT,
               params TEXT DEFAULT '{}',
               seq   INTEGER NOT NULL DEFAULT 0,
               PRIMARY KEY (uuid, field, seq, value)
             );
 
             CREATE INDEX IF NOT EXISTS idx_items_fn ON items(fn);
+            CREATE INDEX IF NOT EXISTS idx_items_fn_norm ON items(fn_norm);
             CREATE INDEX IF NOT EXISTS idx_props_field ON props(field);
             CREATE INDEX IF NOT EXISTS idx_props_value ON props(value);
+            CREATE INDEX IF NOT EXISTS idx_props_value_norm ON props(value_norm);
             CREATE INDEX IF NOT EXISTS idx_props_fn ON props(fn);
         "#,
         )?;
+
+        // Migration for existing DBs: ensure columns exist and backfill
+        self.ensure_norm_columns()?;
+        self.backfill_norm_columns()?;
+        Ok(())
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({})", table))?;
+        let rows = stmt.query_map([], |row: &Row| -> rusqlite::Result<String> { row.get(1) })?;
+        for r in rows {
+            if r? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn ensure_norm_columns(&mut self) -> Result<()> {
+        if !self.column_exists("items", "fn_norm")? {
+            let _ = self
+                .conn
+                .execute_batch("ALTER TABLE items ADD COLUMN fn_norm TEXT;")?;
+        }
+        if !self.column_exists("props", "value_norm")? {
+            let _ = self
+                .conn
+                .execute_batch("ALTER TABLE props ADD COLUMN value_norm TEXT;")?;
+        }
+        Ok(())
+    }
+
+    fn backfill_norm_columns(&mut self) -> Result<()> {
+        // items.fn_norm backfill
+        let items_to_update: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT uuid, fn FROM items WHERE fn_norm IS NULL OR fn_norm = ''")?;
+            let rows = stmt.query_map([], |row| {
+                let uuid: String = row.get(0)?;
+                let fun: String = row.get(1)?;
+                Ok((uuid, fun))
+            })?;
+            let mut acc = Vec::new();
+            for r in rows {
+                acc.push(r?);
+            }
+            acc
+        };
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut upd = tx.prepare("UPDATE items SET fn_norm = ?1 WHERE uuid = ?2")?;
+            for (uuid, fun) in items_to_update {
+                let norm = fun.to_lowercase();
+                let _ = upd.execute(params![norm, uuid])?;
+            }
+        }
+        tx.commit()?;
+
+        // props.value_norm backfill
+        let props_to_update: Vec<(String, String, i64, String)> = {
+            let mut stmt2 = self.conn.prepare(
+                "SELECT uuid, field, seq, value FROM props WHERE value_norm IS NULL OR value_norm = ''",
+            )?;
+            let rows2 = stmt2.query_map([], |row| {
+                let uuid: String = row.get(0)?;
+                let field: String = row.get(1)?;
+                let seq: i64 = row.get(2)?;
+                let value: String = row.get(3)?;
+                Ok((uuid, field, seq, value))
+            })?;
+            let mut acc = Vec::new();
+            for r in rows2 {
+                acc.push(r?);
+            }
+            acc
+        };
+        let tx2 = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut upd = tx2.prepare(
+                "UPDATE props SET value_norm = ?1 WHERE uuid = ?2 AND field = ?3 AND seq = ?4 AND value = ?5",
+            )?;
+            for (uuid, field, seq, value) in props_to_update {
+                let norm = value.to_lowercase();
+                let _ = upd.execute(params![norm, uuid, field, seq, value])?;
+            }
+        }
+        tx2.commit()?;
+
         Ok(())
     }
 
@@ -124,11 +223,12 @@ impl Database {
 
         tx.execute(
             r#"
-            INSERT INTO items (uuid, path, fn, rev, has_photo, has_logo, sha1, mtime, lang_pref)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            INSERT INTO items (uuid, path, fn, fn_norm, rev, has_photo, has_logo, sha1, mtime, lang_pref)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(uuid) DO UPDATE SET
               path=excluded.path,
               fn=excluded.fn,
+              fn_norm=excluded.fn_norm,
               rev=excluded.rev,
               has_photo=excluded.has_photo,
               has_logo=excluded.has_logo,
@@ -140,6 +240,7 @@ impl Database {
                 item.uuid,
                 item.path.to_string_lossy(),
                 item.display_fn,
+                item.display_fn.to_lowercase(),
                 item.rev,
                 if item.has_photo { 1 } else { 0 },
                 if item.has_logo { 1 } else { 0 },
@@ -153,8 +254,8 @@ impl Database {
 
         {
             let mut stmt = tx.prepare(
-                r#"INSERT INTO props (uuid, fn, field, value, params, seq)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+                r#"INSERT INTO props (uuid, fn, field, value, value_norm, params, seq)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
             )?;
 
             for prop in props {
@@ -165,6 +266,7 @@ impl Database {
                     item.display_fn,
                     prop.field,
                     prop.value,
+                    prop.value.to_lowercase(),
                     params_json,
                     prop.seq,
                 ])?;
@@ -247,10 +349,10 @@ impl Database {
         if let Some(filter) = filter {
             let pattern = search::like_pattern(filter);
             sql.push_str(
-                " WHERE LOWER(fn) LIKE ?1 OR EXISTS (
+                " WHERE fn_norm LIKE ?1 OR EXISTS (
                     SELECT 1 FROM props WHERE props.uuid = items.uuid
                       AND props.field IN ('NICKNAME','ORG','EMAIL','TEL')
-                      AND LOWER(props.value) LIKE ?1
+                      AND props.value_norm LIKE ?1
                  )",
             );
             args.push(pattern);
