@@ -140,6 +140,24 @@ impl Database {
         Ok(())
     }
 
+    pub fn reset_schema(&mut self) -> Result<()> {
+        // Drop and recreate schema from scratch
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS props;
+            DROP TABLE IF EXISTS items;
+            "#,
+        )?;
+        tx.commit()?;
+
+        // Recreate schema using latest setup (creates tables, columns, and indexes)
+        self.setup()?;
+        Ok(())
+    }
+
     fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
         let mut stmt = self
             .conn

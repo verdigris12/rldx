@@ -108,14 +108,10 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
     let files = vdir::list_vcf_files(&config.vdir)?;
     let paths_set: HashSet<_> = files.iter().cloned().collect();
     if force {
-        db.clear_all()?;
+        // Nuke DB schema and rebuild from scratch
+        db.reset_schema()?;
     }
-    let stored = if force {
-        // Treat as empty to force full rebuild
-        Default::default()
-    } else {
-        db.stored_items()?
-    };
+    let stored = if force { Default::default() } else { db.stored_items()? };
 
     for path in files {
         let mut state = vdir::compute_file_state(&path)?;
@@ -149,13 +145,11 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
             requires_index = true;
         }
 
-        if !requires_index {
-            continue;
+        if force || requires_index {
+            let card = cards.into_iter().next().unwrap();
+            let record = indexer::build_record(&path, &card, &state, None)?;
+            db.upsert(&record.item, &record.props)?;
         }
-
-        let card = cards.into_iter().next().unwrap();
-        let record = indexer::build_record(&path, &card, &state, None)?;
-        db.upsert(&record.item, &record.props)?;
     }
 
     db.remove_missing(&paths_set)?;
