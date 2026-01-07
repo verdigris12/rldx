@@ -7,6 +7,75 @@ vdir = "/path/to/your/vdir"
 # Optional: default region to use when normalizing phone numbers (ISO 3166-1 alpha-2).
 # phone_region = "US"
 
+# =============================================================================
+# Key Bindings
+# =============================================================================
+# Keys are organized by context. Each action can have multiple bindings.
+# Supported key names:
+#   - Single characters: "a", "A", "/", "?", etc.
+#   - Special keys: "Enter", "Escape", "Tab", "Backtab", "Space", "Backspace"
+#   - Arrow keys: "Up", "Down", "Left", "Right"
+#   - Navigation: "PageUp", "PageDown", "Home", "End"
+#   - Function keys: "F1" through "F12"
+#
+# Note: Ctrl/Alt/Super modifiers are NOT supported.
+# Key bindings within each context must not collide.
+
+[keys.global]
+# Keys that work in most contexts
+quit = ["q"]
+search = ["/"]
+help = ["F1", "?"]
+
+[keys.search_input]
+# Keys when typing in the search box
+cancel = ["Escape"]              # Move focus to results
+confirm = ["Enter"]              # Select contact and close search
+
+[keys.search_results]
+# Keys when navigating search results
+cancel = ["Escape"]              # Close search
+confirm = ["Enter"]              # Select contact and close search
+next = ["j", "Down", "Tab"]      # Next result
+prev = ["k", "Up", "Backtab"]    # Previous result
+page_down = ["PageDown"]         # Jump down 5
+page_up = ["PageUp"]             # Jump up 5
+mark = ["Space"]                 # Mark/unmark contact for merge
+merge = ["m"]                    # Merge marked contacts
+toggle_marked = ["M"]            # Toggle marked-only view
+
+[keys.navigation]
+# Keys when navigating card/detail panes (search closed)
+next = ["j", "Down", "Tab"]      # Next field
+prev = ["k", "Up", "Backtab"]    # Previous field
+tab_next = ["l", "Right"]        # Next pane/tab
+tab_prev = ["h", "Left"]         # Previous pane/tab
+edit = ["e"]                     # Edit current field
+copy = ["y", "Space"]            # Copy current field value
+confirm = ["Enter"]              # Open multivalue modal (if applicable)
+add_alias = ["a"]                # Add alias (when ALIAS field focused)
+photo_fetch = ["i"]              # Fetch photo from URL (not implemented)
+lang_cycle = ["L"]               # Cycle display language (not implemented)
+
+[keys.modal]
+# Keys in modal dialogs (multivalue, confirm, alias)
+cancel = ["Escape", "q"]         # Close modal
+confirm = ["Enter", "y"]         # Confirm action
+next = ["j", "Down", "Tab"]      # Next item
+prev = ["k", "Up", "Backtab"]    # Previous item
+edit = ["e"]                     # Edit selected item
+copy = ["y", "Space"]            # Copy and close
+set_default = ["d"]              # Set as default value
+
+[keys.editor]
+# Keys when editing a field inline
+cancel = ["Escape"]              # Cancel edit
+confirm = ["Enter"]              # Save edit
+
+# =============================================================================
+# UI Configuration
+# =============================================================================
+
 [ui.colors]
 # RGB values for the UI theme.
 border = [255, 140, 0]
@@ -27,6 +96,14 @@ width = 40
 # Height of the image pane in rows.
 height = 12
 
+# =============================================================================
+# Commands
+# =============================================================================
+
 [commands]
 # Program that receives copied values on stdin.
+# Examples:
+#   copy = ["wl-copy"]                           # Wayland
+#   copy = ["xclip", "-selection", "clipboard"]  # X11
+#   copy = ["pbcopy"]                            # macOS
 copy = ["wl-copy"]

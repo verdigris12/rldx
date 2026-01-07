@@ -358,16 +358,16 @@ impl<'a> App<'a> {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Ctrl+C always quits (hardcoded for safety)
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
         {
             return Ok(true);
         }
 
-        if self.editor.active {
-            if self.handle_editor_key(key)? {
-                return Ok(false);
-            }
+        // Route to context-specific handlers first
+        if self.editor.active && self.handle_editor_key(key)? {
+            return Ok(false);
         }
 
         if self.confirm_modal.is_some() {
@@ -389,117 +389,155 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        if self.key_matches(&key, &self.config.keys.quit)
-            && !matches!(self.focused_pane, PaneFocus::Search)
-        {
+        // Handle navigation context (card/detail panes when search is closed)
+        self.handle_navigation_key(key)
+    }
+
+    /// Handle keys in navigation context (card/detail panes)
+    fn handle_navigation_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let nav = &self.config.keys.navigation;
+        let global = &self.config.keys.global;
+
+        // Global: quit (only when not in search)
+        if self.key_matches_any(&key, &global.quit) {
             return Ok(true);
         }
 
-        // When search is open, Enter behavior is handled inside handle_search_key
-
-        if self.key_matches(&key, &self.config.keys.toggle_search) {
+        // Global: open search
+        if self.key_matches_any(&key, &global.search) {
             self.show_search = true;
             self.focused_pane = PaneFocus::Search;
             self.search_focus = SearchFocus::Input;
             return Ok(false);
         }
 
-        if self.key_matches(&key, &self.config.keys.tab_next) {
-            self.advance_field(1);
+        // Global: help (not yet implemented)
+        if self.key_matches_any(&key, &global.help) {
+            self.set_status("Help is not yet implemented");
             return Ok(false);
         }
 
-        if matches!(key.code, KeyCode::Enter) {
-            if self.open_multivalue_modal_for_current_field() {
+        // Navigation: confirm (open multivalue modal if applicable)
+        if self.key_matches_any(&key, &nav.confirm)
+            && self.open_multivalue_modal_for_current_field()
+        {
+            return Ok(false);
+        }
+
+        // Navigation: next/prev field
+        if self.key_matches_any(&key, &nav.next) {
+            self.advance_field(1);
+            return Ok(false);
+        }
+        if self.key_matches_any(&key, &nav.prev) {
+            self.advance_field(-1);
+            return Ok(false);
+        }
+
+        // Navigation: tab next/prev (switch between panes)
+        if self.key_matches_any(&key, &nav.tab_next) {
+            self.advance_tab(1);
+            return Ok(false);
+        }
+        if self.key_matches_any(&key, &nav.tab_prev) {
+            self.advance_tab(-1);
+            return Ok(false);
+        }
+
+        // Navigation: edit
+        if self.key_matches_any(&key, &nav.edit) {
+            self.begin_edit();
+            return Ok(false);
+        }
+
+        // Navigation: copy
+        if self.key_matches_any(&key, &nav.copy) {
+            self.copy_focused_value()?;
+            return Ok(false);
+        }
+
+        // Navigation: add alias (only when ALIAS field is focused)
+        if self.key_matches_any(&key, &nav.add_alias) {
+            if let Some(field) = self.focused_field() {
+                if field.label.eq_ignore_ascii_case("ALIAS") {
+                    self.alias_modal = Some(AliasModal { input: Input::default() });
+                    self.set_status("Add alias");
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Navigation: photo fetch
+        if self.key_matches_any(&key, &nav.photo_fetch) {
+            self.set_status("Image fetch is not yet implemented");
+            return Ok(false);
+        }
+
+        // Navigation: language cycle
+        if self.key_matches_any(&key, &nav.lang_cycle) {
+            self.set_status("Language toggle not yet implemented");
+            return Ok(false);
+        }
+
+        // Digit shortcuts for pane focus (1-5)
+        if let KeyCode::Char(c) = key.code {
+            if self.focus_by_digit(c) {
                 return Ok(false);
             }
         }
 
-        match key.code {
-            KeyCode::Esc => {
-                if self.show_search {
-                    self.focus_pane(PaneFocus::Card);
-                    self.refresh_contacts()?;
-                } else if self.editor.active {
-                    self.editor.cancel();
-                } else {
-                    self.focus_pane(PaneFocus::Card);
-                }
-            }
-            KeyCode::BackTab => {
-                self.advance_field(-1);
-            }
-            KeyCode::Backspace => {
-                if !self.show_search {
-                    self.advance_field(-1);
-                }
-            }
-            KeyCode::Char(' ') => {
-                self.copy_focused_value()?;
-            }
-            KeyCode::Char(c) => {
-                if self.focus_by_digit(c) {
-                    // handled by digit shortcuts
-                } else if self.key_matches(&key, &self.config.keys.next) {
-                    self.move_selection(1)?;
-                } else if self.key_matches(&key, &self.config.keys.prev) {
-                    self.move_selection(-1)?;
-                } else if self.key_matches(&key, &self.config.keys.edit) {
-                    self.begin_edit();
-                } else if matches!(c, 'a' | 'A') {
-                    // Open Add Alias modal only when ALIAS field is focused
-                    if let Some(field) = self.focused_field() {
-                        if field.label.eq_ignore_ascii_case("ALIAS") {
-                            self.alias_modal = Some(AliasModal { input: Input::default() });
-                            self.set_status("Add alias");
-                        }
-                    }
-                } else if self.key_matches(&key, &self.config.keys.photo_fetch) {
-                    self.set_status("Image fetch is not yet implemented");
-                } else if self.key_matches(&key, &self.config.keys.lang_next) {
-                    self.set_status("Language toggle not yet implemented");
-                }
-            }
-            KeyCode::Down => {
-                if self.show_search {
-                    self.move_selection(1)?;
-                } else {
-                    self.advance_field(1);
-                }
-            }
-            KeyCode::Up => {
-                if self.show_search {
-                    self.move_selection(-1)?;
-                } else {
-                    self.advance_field(-1);
-                }
-            }
-            KeyCode::PageDown => self.move_selection(5)?,
-            KeyCode::PageUp => self.move_selection(-5)?,
-            _ => {}
-        }
         Ok(false)
+    }
+
+    /// Advance to next/previous tab (pane)
+    fn advance_tab(&mut self, delta: isize) {
+        match self.focused_pane {
+            PaneFocus::Search => {
+                // From search, go to card
+                self.focus_pane(PaneFocus::Card);
+            }
+            PaneFocus::Card => {
+                if delta > 0 {
+                    self.focus_pane(PaneFocus::Detail(DetailTab::Work));
+                } else {
+                    // Wrap to last tab
+                    self.focus_pane(PaneFocus::Detail(DetailTab::Metadata));
+                }
+            }
+            PaneFocus::Detail(tab) => {
+                let next_tab = if delta > 0 {
+                    tab.next()
+                } else {
+                    tab.prev()
+                };
+                match next_tab {
+                    Some(t) => self.focus_pane(PaneFocus::Detail(t)),
+                    None => self.focus_pane(PaneFocus::Card),
+                }
+            }
+        }
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<bool> {
         match self.search_focus {
             SearchFocus::Input => {
-                match key.code {
-                    KeyCode::Esc => {
-                        // Move focus to results (do not close search)
-                        self.search_focus = SearchFocus::Results;
-                        return Ok(true);
-                    }
-                    KeyCode::Enter => {
-                        // Open selected contact (keep filter), collapse search
-                        self.show_search = false;
-                        self.focus_pane(PaneFocus::Card);
-                        self.refresh_contacts()?;
-                        return Ok(true);
-                    }
-                    _ => {}
+                let input_keys = &self.config.keys.search_input;
+
+                // Cancel: move focus to results (do not close search)
+                if self.key_matches_any(&key, &input_keys.cancel) {
+                    self.search_focus = SearchFocus::Results;
+                    return Ok(true);
                 }
 
+                // Confirm: open selected contact, collapse search
+                if self.key_matches_any(&key, &input_keys.confirm) {
+                    self.show_search = false;
+                    self.focus_pane(PaneFocus::Card);
+                    self.refresh_contacts()?;
+                    return Ok(true);
+                }
+
+                // Pass other keys to the input widget
                 if let Some(change) = self.search_input.handle_event(&Event::Key(key)) {
                     if change.value {
                         self.refresh_contacts()?;
@@ -509,88 +547,86 @@ impl<'a> App<'a> {
                 Ok(false)
             }
             SearchFocus::Results => {
-                // '/' refocuses input
-                if self.key_matches(&key, &self.config.keys.toggle_search) {
+                let results_keys = &self.config.keys.search_results;
+                let global_keys = &self.config.keys.global;
+
+                // Global: search key refocuses input
+                if self.key_matches_any(&key, &global_keys.search) {
                     self.search_focus = SearchFocus::Input;
                     return Ok(true);
                 }
 
-                match key.code {
-                    KeyCode::Char('m') => {
-                        // Open confirmation modal for merge
-                        let count = self.marked.len();
-                        if count < 2 {
-                            self.set_status("Mark at least 2 contacts to merge");
-                            return Ok(true);
-                        }
-                        self.confirm_modal = Some(ConfirmModal {
-                            title: "MERGE CONTACTS".to_string(),
-                            message: format!(
-                                "Merge {} marked contacts into a single card?",
-                                count
-                            ),
-                        });
-                        return Ok(true);
-                    }
-                    // Use plain 'm' to avoid Ctrl+M being mapped to Enter by terminals
-                    KeyCode::Char('M') => {
-                        // Toggle between results and marked-only view
-                        self.show_marked_only = !self.show_marked_only;
-                        if self.show_marked_only {
-                            self.rebuild_marked_contacts()?;
-                        } else {
-                            self.refresh_contacts()?;
-                        }
-                        return Ok(true);
-                    }
-                    KeyCode::Char(' ') => {
-                        self.toggle_mark_current();
-                        // If viewing marked-only, update the list immediately
-                        if self.show_marked_only {
-                            self.rebuild_marked_contacts()?;
-                        } else {
-                            self.rebuild_search_rows();
-                        }
-                        return Ok(true);
-                    }
-                    KeyCode::Esc => {
-                        self.show_search = false;
-                        self.refresh_contacts()?;
-                        return Ok(true);
-                    }
-                    KeyCode::Enter => {
-                        // Open selected contact and collapse search
-                        self.show_search = false;
-                        self.focus_pane(PaneFocus::Card);
-                        self.refresh_contacts()?;
-                        return Ok(true);
-                    }
-                    KeyCode::Up => {
-                        self.move_selection(-1)?;
-                        return Ok(true);
-                    }
-                    KeyCode::Down => {
-                        self.move_selection(1)?;
-                        return Ok(true);
-                    }
-                    KeyCode::Tab => {
-                        self.move_selection(1)?;
-                        return Ok(true);
-                    }
-                    KeyCode::Backspace | KeyCode::BackTab => {
-                        self.move_selection(-1)?;
-                        return Ok(true);
-                    }
-                    _ => {}
+                // Cancel: close search
+                if self.key_matches_any(&key, &results_keys.cancel) {
+                    self.show_search = false;
+                    self.refresh_contacts()?;
+                    return Ok(true);
                 }
 
-                // Also support configured next/prev keys while in results
-                if self.key_matches(&key, &self.config.keys.next) {
+                // Confirm: open selected contact and collapse search
+                if self.key_matches_any(&key, &results_keys.confirm) {
+                    self.show_search = false;
+                    self.focus_pane(PaneFocus::Card);
+                    self.refresh_contacts()?;
+                    return Ok(true);
+                }
+
+                // Next/prev selection
+                if self.key_matches_any(&key, &results_keys.next) {
                     self.move_selection(1)?;
                     return Ok(true);
                 }
-                if self.key_matches(&key, &self.config.keys.prev) {
+                if self.key_matches_any(&key, &results_keys.prev) {
                     self.move_selection(-1)?;
+                    return Ok(true);
+                }
+
+                // Page up/down
+                if self.key_matches_any(&key, &results_keys.page_down) {
+                    self.move_selection(5)?;
+                    return Ok(true);
+                }
+                if self.key_matches_any(&key, &results_keys.page_up) {
+                    self.move_selection(-5)?;
+                    return Ok(true);
+                }
+
+                // Mark contact for merge
+                if self.key_matches_any(&key, &results_keys.mark) {
+                    self.toggle_mark_current();
+                    if self.show_marked_only {
+                        self.rebuild_marked_contacts()?;
+                    } else {
+                        self.rebuild_search_rows();
+                    }
+                    return Ok(true);
+                }
+
+                // Merge marked contacts
+                if self.key_matches_any(&key, &results_keys.merge) {
+                    let count = self.marked.len();
+                    if count < 2 {
+                        self.set_status("Mark at least 2 contacts to merge");
+                        return Ok(true);
+                    }
+                    self.confirm_modal = Some(ConfirmModal {
+                        title: "MERGE CONTACTS".to_string(),
+                        message: format!(
+                            "Merge {} marked contacts into a single card?",
+                            count
+                        ),
+                    });
+                    return Ok(true);
+                }
+
+                // Toggle marked-only view
+                if self.key_matches_any(&key, &results_keys.toggle_marked) {
+                    self.show_marked_only = !self.show_marked_only;
+                    if self.show_marked_only {
+                        self.rebuild_marked_contacts()?;
+                    } else {
+                        self.refresh_contacts()?;
+                    }
                     return Ok(true);
                 }
 
@@ -725,27 +761,31 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        match key.code {
-            KeyCode::Esc => {
-                self.editor.cancel();
-                self.set_status("Edit cancelled");
-            }
-            KeyCode::Enter => {
-                if let Some(target) = self.editor.target().cloned() {
-                    let value = self.editor.value().to_string();
-                    self.editor.cancel();
-                    self.commit_field_edit(target, value)?;
-                    self.set_status("Field updated");
-                } else {
-                    self.editor.cancel();
-                    self.set_status("Field not editable");
-                }
-            }
-            _ => {
-                self.editor.handle_key_event(key);
-            }
+        let editor_keys = &self.config.keys.editor;
+
+        // Cancel editing
+        if self.key_matches_any(&key, &editor_keys.cancel) {
+            self.editor.cancel();
+            self.set_status("Edit cancelled");
+            return Ok(true);
         }
 
+        // Confirm edit
+        if self.key_matches_any(&key, &editor_keys.confirm) {
+            if let Some(target) = self.editor.target().cloned() {
+                let value = self.editor.value().to_string();
+                self.editor.cancel();
+                self.commit_field_edit(target, value)?;
+                self.set_status("Field updated");
+            } else {
+                self.editor.cancel();
+                self.set_status("Field not editable");
+            }
+            return Ok(true);
+        }
+
+        // Pass other keys to the editor widget
+        self.editor.handle_key_event(key);
         Ok(true)
     }
 
@@ -754,105 +794,128 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        // When editing inline inside the modal
+        let editor_keys = &self.config.keys.editor;
+        let modal_keys = &self.config.keys.modal;
+
+        // When editing inline inside the modal, use editor keys
         if self.editor.active {
-            match key.code {
-                KeyCode::Esc => {
-                    // Cancel editing but keep modal open
+            if self.key_matches_any(&key, &editor_keys.cancel) {
+                self.editor.cancel();
+                self.set_status("Edit cancelled");
+                return Ok(());
+            }
+
+            if self.key_matches_any(&key, &editor_keys.confirm) {
+                if let Some(target) = self.editor.target().cloned() {
+                    let value = self.editor.value().to_string();
                     self.editor.cancel();
-                    self.set_status("Edit cancelled");
+                    self.commit_field_edit(target.clone(), value)?;
+                    // Keep the modal open and rebuild it for the same field, keep selection
+                    if let Some(field) = MultiValueField::from_field_name(&target.field) {
+                        self.rebuild_multivalue_modal(field, Some(target.seq));
+                    }
+                    self.set_status("Field updated");
                     return Ok(());
                 }
-                KeyCode::Enter => {
-                    if let Some(target) = self.editor.target().cloned() {
-                        let value = self.editor.value().to_string();
-                        self.editor.cancel();
-                        self.commit_field_edit(target.clone(), value)?;
-                        // Keep the modal open and rebuild it for the same field, keep selection
-                        if let Some(field) = MultiValueField::from_field_name(&target.field) {
-                            self.rebuild_multivalue_modal(field, Some(target.seq));
-                        }
-                        self.set_status("Field updated");
-                        return Ok(());
-                    }
-                }
-                _ => {
-                    // Route other keys to the inline editor; if it handled, stop here
-                    if self.editor.handle_key_event(key) {
-                        return Ok(());
-                    }
-                }
+            }
+
+            // Route other keys to the inline editor
+            if self.editor.handle_key_event(key) {
+                return Ok(());
             }
         }
 
-        match key.code {
-            KeyCode::Esc => {
+        // Modal: cancel (close modal)
+        if self.key_matches_any(&key, &modal_keys.cancel) {
+            self.close_multivalue_modal();
+            return Ok(());
+        }
+
+        // Modal: edit selected item
+        if self.key_matches_any(&key, &modal_keys.edit) {
+            if let Some((field, item)) = self.current_modal_selection() {
+                let target = FieldRef::new(field.field_name(), item.seq);
+                self.editor.start(&item.value, target);
+                self.set_status(format!("Editing {}", field.field_name()));
+            }
+            return Ok(());
+        }
+
+        // Modal: next/prev selection
+        if self.key_matches_any(&key, &modal_keys.next) {
+            if let Some(modal) = self.multivalue_modal.as_mut() {
+                modal.select_next();
+            }
+            return Ok(());
+        }
+        if self.key_matches_any(&key, &modal_keys.prev) {
+            if let Some(modal) = self.multivalue_modal.as_mut() {
+                modal.select_prev();
+            }
+            return Ok(());
+        }
+
+        // Modal: set default
+        if self.key_matches_any(&key, &modal_keys.set_default) {
+            if let Some((field, item)) = self.current_modal_selection() {
+                if self.set_multivalue_default(field, item.seq)? {
+                    self.rebuild_multivalue_modal(field, None);
+                    self.set_status("Default updated");
+                }
+            }
+            return Ok(());
+        }
+
+        // Modal: copy and close
+        if self.key_matches_any(&key, &modal_keys.copy) {
+            if let Some((_, item)) = self.current_modal_selection() {
+                self.copy_value_to_clipboard(&item.copy_value)?;
                 self.close_multivalue_modal();
             }
-            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'q') => {
-                self.close_multivalue_modal();
-            }
-            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'e') => {
-                if let Some((field, item)) = self.current_modal_selection() {
-                    // Start inline edit for the selected item within the modal
-                    let target = FieldRef::new(field.field_name(), item.seq);
-                    self.editor.start(&item.value, target);
-                    self.set_status(format!("Editing {}", field.field_name()));
+            return Ok(());
+        }
+
+        // Modal: confirm (also sets default, for Enter key)
+        if self.key_matches_any(&key, &modal_keys.confirm) {
+            if let Some((field, item)) = self.current_modal_selection() {
+                if self.set_multivalue_default(field, item.seq)? {
+                    self.rebuild_multivalue_modal(field, None);
+                    self.set_status("Default updated");
                 }
             }
-            KeyCode::Tab | KeyCode::Down => {
-                if let Some(modal) = self.multivalue_modal.as_mut() {
-                    modal.select_next();
-                }
-            }
-            KeyCode::Backspace | KeyCode::BackTab | KeyCode::Up => {
-                if let Some(modal) = self.multivalue_modal.as_mut() {
-                    modal.select_prev();
-                }
-            }
-            KeyCode::Enter => {
-                if let Some((field, item)) = self.current_modal_selection() {
-                    if self.set_multivalue_default(field, item.seq)? {
-                        self.rebuild_multivalue_modal(field, None);
-                        self.set_status("Default updated");
-                    }
-                }
-            }
-            KeyCode::Char(' ') => {
-                if let Some((_, item)) = self.current_modal_selection() {
-                    self.copy_value_to_clipboard(&item.copy_value)?;
-                    self.close_multivalue_modal();
-                }
-            }
-            _ => {}
+            return Ok(());
         }
 
         Ok(())
     }
 
     fn handle_alias_modal_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(modal) = self.alias_modal.as_mut() else { return Ok(()); };
+        let modal_keys = &self.config.keys.modal;
 
-        match key.code {
-            KeyCode::Esc => {
-                self.alias_modal = None;
-                return Ok(());
-            }
-            KeyCode::Enter => {
-                let value = modal.input.value().trim().to_string();
-                self.alias_modal = None;
-                if value.is_empty() {
-                    return Ok(());
-                }
-                self.add_alias_to_current_contact(&value)?;
-                self.set_status("Alias added");
-                return Ok(());
-            }
-            _ => {}
+        // Cancel: close modal
+        if self.key_matches_any(&key, &modal_keys.cancel) {
+            self.alias_modal = None;
+            return Ok(());
         }
 
-        // Route to inline input
-        let _ = modal.input.handle_event(&Event::Key(key));
+        // Confirm: add alias
+        if self.key_matches_any(&key, &modal_keys.confirm) {
+            let value = self.alias_modal.as_ref()
+                .map(|m| m.input.value().trim().to_string())
+                .unwrap_or_default();
+            self.alias_modal = None;
+            if value.is_empty() {
+                return Ok(());
+            }
+            self.add_alias_to_current_contact(&value)?;
+            self.set_status("Alias added");
+            return Ok(());
+        }
+
+        // Route other keys to inline input
+        if let Some(modal) = self.alias_modal.as_mut() {
+            let _ = modal.input.handle_event(&Event::Key(key));
+        }
         Ok(())
     }
 
@@ -861,22 +924,25 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        match key.code {
-            KeyCode::Esc => {
-                self.confirm_modal = None;
-            }
-            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'n') || c.eq_ignore_ascii_case(&'q') => {
-                self.confirm_modal = None;
-            }
-            KeyCode::Enter => {
-                self.confirm_modal = None;
-                self.merge_marked_contacts()?;
-            }
-            KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => {
-                self.confirm_modal = None;
-                self.merge_marked_contacts()?;
-            }
-            _ => {}
+        let modal_keys = &self.config.keys.modal;
+
+        // Cancel: close modal without action
+        if self.key_matches_any(&key, &modal_keys.cancel) {
+            self.confirm_modal = None;
+            return Ok(());
+        }
+
+        // Also accept 'n' as cancel (common convention)
+        if matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'n')) {
+            self.confirm_modal = None;
+            return Ok(());
+        }
+
+        // Confirm: execute action (merge)
+        if self.key_matches_any(&key, &modal_keys.confirm) {
+            self.confirm_modal = None;
+            self.merge_marked_contacts()?;
+            return Ok(());
         }
 
         Ok(())
@@ -1527,24 +1593,56 @@ impl<'a> App<'a> {
         Ok(true)
     }
 
-    fn key_matches(&self, event: &KeyEvent, binding: &str) -> bool {
+    /// Check if the key event matches any of the bindings in the list
+    fn key_matches_any(&self, event: &KeyEvent, bindings: &[String]) -> bool {
+        bindings.iter().any(|b| self.key_matches_single(event, b))
+    }
+
+    /// Check if the key event matches a single binding string
+    fn key_matches_single(&self, event: &KeyEvent, binding: &str) -> bool {
         let trimmed = binding.trim();
         if trimmed.is_empty() {
             return false;
         }
 
+        // Disallow Ctrl/Alt/Super modifiers (we don't support them)
         let disallowed = KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER;
         if event.modifiers.intersects(disallowed) {
             return false;
         }
 
         match trimmed.to_ascii_lowercase().as_str() {
+            // Special keys
             "enter" => matches!(event.code, KeyCode::Enter),
             "tab" => matches!(event.code, KeyCode::Tab),
             "backtab" | "shift+tab" => matches!(event.code, KeyCode::BackTab),
             "backspace" => matches!(event.code, KeyCode::Backspace),
             "esc" | "escape" => matches!(event.code, KeyCode::Esc),
             "space" => matches!(event.code, KeyCode::Char(' ')),
+            // Arrow keys
+            "up" => matches!(event.code, KeyCode::Up),
+            "down" => matches!(event.code, KeyCode::Down),
+            "left" => matches!(event.code, KeyCode::Left),
+            "right" => matches!(event.code, KeyCode::Right),
+            // Page navigation
+            "pageup" | "page_up" => matches!(event.code, KeyCode::PageUp),
+            "pagedown" | "page_down" => matches!(event.code, KeyCode::PageDown),
+            "home" => matches!(event.code, KeyCode::Home),
+            "end" => matches!(event.code, KeyCode::End),
+            // Function keys
+            "f1" => matches!(event.code, KeyCode::F(1)),
+            "f2" => matches!(event.code, KeyCode::F(2)),
+            "f3" => matches!(event.code, KeyCode::F(3)),
+            "f4" => matches!(event.code, KeyCode::F(4)),
+            "f5" => matches!(event.code, KeyCode::F(5)),
+            "f6" => matches!(event.code, KeyCode::F(6)),
+            "f7" => matches!(event.code, KeyCode::F(7)),
+            "f8" => matches!(event.code, KeyCode::F(8)),
+            "f9" => matches!(event.code, KeyCode::F(9)),
+            "f10" => matches!(event.code, KeyCode::F(10)),
+            "f11" => matches!(event.code, KeyCode::F(11)),
+            "f12" => matches!(event.code, KeyCode::F(12)),
+            // Single character (case-insensitive for letters)
             _ => {
                 let mut chars = trimmed.chars();
                 if let (Some(first), None) = (chars.next(), chars.next()) {

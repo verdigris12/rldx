@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -74,35 +74,570 @@ pub struct CommandExec {
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+// =============================================================================
+// Key Bindings - Context-aware with multiple bindings per action
+// =============================================================================
+
+/// All key bindings organized by context
+#[derive(Debug, Clone)]
 pub struct Keys {
-    pub toggle_search: String,
-    pub confirm: String,
-    pub quit: String,
-    pub next: String,
-    pub prev: String,
-    pub edit: String,
-    pub photo_fetch: String,
-    pub lang_next: String,
-    pub tab_next: String,
+    /// Global keys (work in most contexts)
+    pub global: GlobalKeys,
+    /// Keys for search input mode
+    pub search_input: SearchInputKeys,
+    /// Keys for search results navigation
+    pub search_results: SearchResultsKeys,
+    /// Keys for card/detail pane navigation
+    pub navigation: NavigationKeys,
+    /// Keys for modal dialogs
+    pub modal: ModalKeys,
+    /// Keys for inline editing
+    pub editor: EditorKeys,
 }
+
+#[derive(Debug, Clone)]
+pub struct GlobalKeys {
+    pub quit: Vec<String>,
+    pub search: Vec<String>,
+    pub help: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchInputKeys {
+    pub cancel: Vec<String>,
+    pub confirm: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchResultsKeys {
+    pub cancel: Vec<String>,
+    pub confirm: Vec<String>,
+    pub next: Vec<String>,
+    pub prev: Vec<String>,
+    pub page_down: Vec<String>,
+    pub page_up: Vec<String>,
+    pub mark: Vec<String>,
+    pub merge: Vec<String>,
+    pub toggle_marked: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NavigationKeys {
+    pub next: Vec<String>,
+    pub prev: Vec<String>,
+    pub tab_next: Vec<String>,
+    pub tab_prev: Vec<String>,
+    pub edit: Vec<String>,
+    pub copy: Vec<String>,
+    pub confirm: Vec<String>,
+    pub add_alias: Vec<String>,
+    pub photo_fetch: Vec<String>,
+    pub lang_cycle: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModalKeys {
+    pub cancel: Vec<String>,
+    pub confirm: Vec<String>,
+    pub next: Vec<String>,
+    pub prev: Vec<String>,
+    pub edit: Vec<String>,
+    pub copy: Vec<String>,
+    pub set_default: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorKeys {
+    pub cancel: Vec<String>,
+    pub confirm: Vec<String>,
+}
+
+// =============================================================================
+// Default implementations
+// =============================================================================
 
 impl Default for Keys {
     fn default() -> Self {
         Self {
-            toggle_search: "/".to_string(),
-            confirm: "Enter".to_string(),
-            quit: "q".to_string(),
-            next: "j".to_string(),
-            prev: "k".to_string(),
-            edit: "e".to_string(),
-            photo_fetch: "i".to_string(),
-            lang_next: "L".to_string(),
-            tab_next: "Tab".to_string(),
+            global: GlobalKeys::default(),
+            search_input: SearchInputKeys::default(),
+            search_results: SearchResultsKeys::default(),
+            navigation: NavigationKeys::default(),
+            modal: ModalKeys::default(),
+            editor: EditorKeys::default(),
         }
     }
 }
+
+impl Default for GlobalKeys {
+    fn default() -> Self {
+        Self {
+            quit: vec!["q".into()],
+            search: vec!["/".into()],
+            help: vec!["F1".into(), "?".into()],
+        }
+    }
+}
+
+impl Default for SearchInputKeys {
+    fn default() -> Self {
+        Self {
+            cancel: vec!["Escape".into()],
+            confirm: vec!["Enter".into()],
+        }
+    }
+}
+
+impl Default for SearchResultsKeys {
+    fn default() -> Self {
+        Self {
+            cancel: vec!["Escape".into()],
+            confirm: vec!["Enter".into()],
+            next: vec!["j".into(), "Down".into(), "Tab".into()],
+            prev: vec!["k".into(), "Up".into(), "Backtab".into()],
+            page_down: vec!["PageDown".into()],
+            page_up: vec!["PageUp".into()],
+            mark: vec!["Space".into()],
+            merge: vec!["m".into()],
+            toggle_marked: vec!["M".into()],
+        }
+    }
+}
+
+impl Default for NavigationKeys {
+    fn default() -> Self {
+        Self {
+            next: vec!["j".into(), "Down".into(), "Tab".into()],
+            prev: vec!["k".into(), "Up".into(), "Backtab".into()],
+            tab_next: vec!["l".into(), "Right".into()],
+            tab_prev: vec!["h".into(), "Left".into()],
+            edit: vec!["e".into()],
+            copy: vec!["y".into(), "Space".into()],
+            confirm: vec!["Enter".into()],
+            add_alias: vec!["a".into()],
+            photo_fetch: vec!["i".into()],
+            lang_cycle: vec!["L".into()],
+        }
+    }
+}
+
+impl Default for ModalKeys {
+    fn default() -> Self {
+        Self {
+            cancel: vec!["Escape".into(), "q".into()],
+            confirm: vec!["Enter".into(), "y".into()],
+            next: vec!["j".into(), "Down".into(), "Tab".into()],
+            prev: vec!["k".into(), "Up".into(), "Backtab".into()],
+            edit: vec!["e".into()],
+            copy: vec!["y".into(), "Space".into()],
+            set_default: vec!["d".into()],
+        }
+    }
+}
+
+impl Default for EditorKeys {
+    fn default() -> Self {
+        Self {
+            cancel: vec!["Escape".into()],
+            confirm: vec!["Enter".into()],
+        }
+    }
+}
+
+// =============================================================================
+// Serde deserialization types (support both single string and array)
+// =============================================================================
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum KeyBinding {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl KeyBinding {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            KeyBinding::Single(s) => vec![s],
+            KeyBinding::Multiple(v) => v,
+        }
+    }
+}
+
+impl Default for KeyBinding {
+    fn default() -> Self {
+        KeyBinding::Multiple(vec![])
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct KeysFile {
+    global: GlobalKeysFile,
+    search_input: SearchInputKeysFile,
+    search_results: SearchResultsKeysFile,
+    navigation: NavigationKeysFile,
+    modal: ModalKeysFile,
+    editor: EditorKeysFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct GlobalKeysFile {
+    quit: KeyBinding,
+    search: KeyBinding,
+    help: KeyBinding,
+}
+
+impl Default for GlobalKeysFile {
+    fn default() -> Self {
+        let defaults = GlobalKeys::default();
+        Self {
+            quit: KeyBinding::Multiple(defaults.quit),
+            search: KeyBinding::Multiple(defaults.search),
+            help: KeyBinding::Multiple(defaults.help),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct SearchInputKeysFile {
+    cancel: KeyBinding,
+    confirm: KeyBinding,
+}
+
+impl Default for SearchInputKeysFile {
+    fn default() -> Self {
+        let defaults = SearchInputKeys::default();
+        Self {
+            cancel: KeyBinding::Multiple(defaults.cancel),
+            confirm: KeyBinding::Multiple(defaults.confirm),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct SearchResultsKeysFile {
+    cancel: KeyBinding,
+    confirm: KeyBinding,
+    next: KeyBinding,
+    prev: KeyBinding,
+    page_down: KeyBinding,
+    page_up: KeyBinding,
+    mark: KeyBinding,
+    merge: KeyBinding,
+    toggle_marked: KeyBinding,
+}
+
+impl Default for SearchResultsKeysFile {
+    fn default() -> Self {
+        let defaults = SearchResultsKeys::default();
+        Self {
+            cancel: KeyBinding::Multiple(defaults.cancel),
+            confirm: KeyBinding::Multiple(defaults.confirm),
+            next: KeyBinding::Multiple(defaults.next),
+            prev: KeyBinding::Multiple(defaults.prev),
+            page_down: KeyBinding::Multiple(defaults.page_down),
+            page_up: KeyBinding::Multiple(defaults.page_up),
+            mark: KeyBinding::Multiple(defaults.mark),
+            merge: KeyBinding::Multiple(defaults.merge),
+            toggle_marked: KeyBinding::Multiple(defaults.toggle_marked),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct NavigationKeysFile {
+    next: KeyBinding,
+    prev: KeyBinding,
+    tab_next: KeyBinding,
+    tab_prev: KeyBinding,
+    edit: KeyBinding,
+    copy: KeyBinding,
+    confirm: KeyBinding,
+    add_alias: KeyBinding,
+    photo_fetch: KeyBinding,
+    lang_cycle: KeyBinding,
+}
+
+impl Default for NavigationKeysFile {
+    fn default() -> Self {
+        let defaults = NavigationKeys::default();
+        Self {
+            next: KeyBinding::Multiple(defaults.next),
+            prev: KeyBinding::Multiple(defaults.prev),
+            tab_next: KeyBinding::Multiple(defaults.tab_next),
+            tab_prev: KeyBinding::Multiple(defaults.tab_prev),
+            edit: KeyBinding::Multiple(defaults.edit),
+            copy: KeyBinding::Multiple(defaults.copy),
+            confirm: KeyBinding::Multiple(defaults.confirm),
+            add_alias: KeyBinding::Multiple(defaults.add_alias),
+            photo_fetch: KeyBinding::Multiple(defaults.photo_fetch),
+            lang_cycle: KeyBinding::Multiple(defaults.lang_cycle),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct ModalKeysFile {
+    cancel: KeyBinding,
+    confirm: KeyBinding,
+    next: KeyBinding,
+    prev: KeyBinding,
+    edit: KeyBinding,
+    copy: KeyBinding,
+    set_default: KeyBinding,
+}
+
+impl Default for ModalKeysFile {
+    fn default() -> Self {
+        let defaults = ModalKeys::default();
+        Self {
+            cancel: KeyBinding::Multiple(defaults.cancel),
+            confirm: KeyBinding::Multiple(defaults.confirm),
+            next: KeyBinding::Multiple(defaults.next),
+            prev: KeyBinding::Multiple(defaults.prev),
+            edit: KeyBinding::Multiple(defaults.edit),
+            copy: KeyBinding::Multiple(defaults.copy),
+            set_default: KeyBinding::Multiple(defaults.set_default),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct EditorKeysFile {
+    cancel: KeyBinding,
+    confirm: KeyBinding,
+}
+
+impl Default for EditorKeysFile {
+    fn default() -> Self {
+        let defaults = EditorKeys::default();
+        Self {
+            cancel: KeyBinding::Multiple(defaults.cancel),
+            confirm: KeyBinding::Multiple(defaults.confirm),
+        }
+    }
+}
+
+// =============================================================================
+// Conversion from file types to runtime types
+// =============================================================================
+
+impl From<KeysFile> for Keys {
+    fn from(file: KeysFile) -> Self {
+        Self {
+            global: file.global.into(),
+            search_input: file.search_input.into(),
+            search_results: file.search_results.into(),
+            navigation: file.navigation.into(),
+            modal: file.modal.into(),
+            editor: file.editor.into(),
+        }
+    }
+}
+
+impl From<GlobalKeysFile> for GlobalKeys {
+    fn from(file: GlobalKeysFile) -> Self {
+        Self {
+            quit: file.quit.into_vec(),
+            search: file.search.into_vec(),
+            help: file.help.into_vec(),
+        }
+    }
+}
+
+impl From<SearchInputKeysFile> for SearchInputKeys {
+    fn from(file: SearchInputKeysFile) -> Self {
+        Self {
+            cancel: file.cancel.into_vec(),
+            confirm: file.confirm.into_vec(),
+        }
+    }
+}
+
+impl From<SearchResultsKeysFile> for SearchResultsKeys {
+    fn from(file: SearchResultsKeysFile) -> Self {
+        Self {
+            cancel: file.cancel.into_vec(),
+            confirm: file.confirm.into_vec(),
+            next: file.next.into_vec(),
+            prev: file.prev.into_vec(),
+            page_down: file.page_down.into_vec(),
+            page_up: file.page_up.into_vec(),
+            mark: file.mark.into_vec(),
+            merge: file.merge.into_vec(),
+            toggle_marked: file.toggle_marked.into_vec(),
+        }
+    }
+}
+
+impl From<NavigationKeysFile> for NavigationKeys {
+    fn from(file: NavigationKeysFile) -> Self {
+        Self {
+            next: file.next.into_vec(),
+            prev: file.prev.into_vec(),
+            tab_next: file.tab_next.into_vec(),
+            tab_prev: file.tab_prev.into_vec(),
+            edit: file.edit.into_vec(),
+            copy: file.copy.into_vec(),
+            confirm: file.confirm.into_vec(),
+            add_alias: file.add_alias.into_vec(),
+            photo_fetch: file.photo_fetch.into_vec(),
+            lang_cycle: file.lang_cycle.into_vec(),
+        }
+    }
+}
+
+impl From<ModalKeysFile> for ModalKeys {
+    fn from(file: ModalKeysFile) -> Self {
+        Self {
+            cancel: file.cancel.into_vec(),
+            confirm: file.confirm.into_vec(),
+            next: file.next.into_vec(),
+            prev: file.prev.into_vec(),
+            edit: file.edit.into_vec(),
+            copy: file.copy.into_vec(),
+            set_default: file.set_default.into_vec(),
+        }
+    }
+}
+
+impl From<EditorKeysFile> for EditorKeys {
+    fn from(file: EditorKeysFile) -> Self {
+        Self {
+            cancel: file.cancel.into_vec(),
+            confirm: file.confirm.into_vec(),
+        }
+    }
+}
+
+// =============================================================================
+// Key binding validation
+// =============================================================================
+
+/// Normalize a key binding string to a canonical form for collision detection
+fn normalize_binding(binding: &str) -> String {
+    binding.trim().to_ascii_lowercase()
+}
+
+/// Check for collisions within a single context
+fn check_context_collisions(
+    bindings: &[(&str, &[String])],
+    context_name: &str,
+) -> Result<()> {
+    let mut seen: HashMap<String, &str> = HashMap::new();
+
+    for (action_name, keys) in bindings {
+        for key in *keys {
+            let normalized = normalize_binding(key);
+            if normalized.is_empty() {
+                continue;
+            }
+            if let Some(existing_action) = seen.get(&normalized) {
+                bail!(
+                    "key binding collision in [keys.{}]: '{}' is bound to both '{}' and '{}'",
+                    context_name,
+                    key,
+                    existing_action,
+                    action_name
+                );
+            }
+            seen.insert(normalized, action_name);
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate all key bindings for collisions within each context
+fn validate_key_bindings(keys: &Keys) -> Result<()> {
+    // Global context
+    check_context_collisions(
+        &[
+            ("quit", &keys.global.quit),
+            ("search", &keys.global.search),
+            ("help", &keys.global.help),
+        ],
+        "global",
+    )?;
+
+    // Search input context
+    check_context_collisions(
+        &[
+            ("cancel", &keys.search_input.cancel),
+            ("confirm", &keys.search_input.confirm),
+        ],
+        "search_input",
+    )?;
+
+    // Search results context
+    check_context_collisions(
+        &[
+            ("cancel", &keys.search_results.cancel),
+            ("confirm", &keys.search_results.confirm),
+            ("next", &keys.search_results.next),
+            ("prev", &keys.search_results.prev),
+            ("page_down", &keys.search_results.page_down),
+            ("page_up", &keys.search_results.page_up),
+            ("mark", &keys.search_results.mark),
+            ("merge", &keys.search_results.merge),
+            ("toggle_marked", &keys.search_results.toggle_marked),
+        ],
+        "search_results",
+    )?;
+
+    // Navigation context
+    check_context_collisions(
+        &[
+            ("next", &keys.navigation.next),
+            ("prev", &keys.navigation.prev),
+            ("tab_next", &keys.navigation.tab_next),
+            ("tab_prev", &keys.navigation.tab_prev),
+            ("edit", &keys.navigation.edit),
+            ("copy", &keys.navigation.copy),
+            ("confirm", &keys.navigation.confirm),
+            ("add_alias", &keys.navigation.add_alias),
+            ("photo_fetch", &keys.navigation.photo_fetch),
+            ("lang_cycle", &keys.navigation.lang_cycle),
+        ],
+        "navigation",
+    )?;
+
+    // Modal context
+    check_context_collisions(
+        &[
+            ("cancel", &keys.modal.cancel),
+            ("confirm", &keys.modal.confirm),
+            ("next", &keys.modal.next),
+            ("prev", &keys.modal.prev),
+            ("edit", &keys.modal.edit),
+            ("copy", &keys.modal.copy),
+            ("set_default", &keys.modal.set_default),
+        ],
+        "modal",
+    )?;
+
+    // Editor context
+    check_context_collisions(
+        &[
+            ("cancel", &keys.editor.cancel),
+            ("confirm", &keys.editor.confirm),
+        ],
+        "editor",
+    )?;
+
+    Ok(())
+}
+
+// =============================================================================
+// Config file structure
+// =============================================================================
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -112,7 +647,7 @@ struct ConfigFile {
     fields_first_pane: Vec<String>,
     phone_region: Option<String>,
     #[serde(default)]
-    keys: Keys,
+    keys: KeysFile,
     #[serde(default)]
     ui: UiFile,
     #[serde(default)]
@@ -125,7 +660,7 @@ impl Default for ConfigFile {
             vdir: None,
             fields_first_pane: default_fields_first_pane(),
             phone_region: None,
-            keys: Keys::default(),
+            keys: KeysFile::default(),
             ui: UiFile::default(),
             commands: CommandsFile::default(),
         }
@@ -199,16 +734,25 @@ pub fn load() -> Result<Config> {
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_uppercase());
 
+    let keys: Keys = cfg_file.keys.into();
+
+    // Validate key bindings for collisions
+    validate_key_bindings(&keys)?;
+
     Ok(Config {
         config_path: path,
         vdir,
         fields_first_pane: cfg_file.fields_first_pane,
         phone_region,
-        keys: cfg_file.keys,
+        keys,
         ui: cfg_file.ui.into(),
         commands: cfg_file.commands.into(),
     })
 }
+
+// =============================================================================
+// Unknown key warnings
+// =============================================================================
 
 fn warn_unknown_keys(value: &toml::Value) {
     let Some(table) = value.as_table() else {
@@ -231,24 +775,7 @@ fn warn_unknown_keys(value: &toml::Value) {
     }
 
     if let Some(keys_val) = table.get("keys") {
-        if let Some(keys_table) = keys_val.as_table() {
-            let key_known = HashSet::from([
-                "toggle_search".to_string(),
-                "confirm".to_string(),
-                "quit".to_string(),
-                "next".to_string(),
-                "prev".to_string(),
-                "edit".to_string(),
-                "photo_fetch".to_string(),
-                "lang_next".to_string(),
-                "tab_next".to_string(),
-            ]);
-            for key in keys_table.keys() {
-                if !key_known.contains(key) {
-                    eprintln!("warning: unknown keys.* entry `{}`", key);
-                }
-            }
-        }
+        warn_unknown_keys_section(keys_val);
     }
 
     if let Some(ui_val) = table.get("ui") {
@@ -257,6 +784,91 @@ fn warn_unknown_keys(value: &toml::Value) {
 
     if let Some(commands_val) = table.get("commands") {
         warn_unknown_commands_keys(commands_val);
+    }
+}
+
+fn warn_unknown_keys_section(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+
+    let known_contexts = HashSet::from([
+        "global",
+        "search_input",
+        "search_results",
+        "navigation",
+        "modal",
+        "editor",
+    ]);
+
+    for key in table.keys() {
+        if !known_contexts.contains(key.as_str()) {
+            eprintln!("warning: unknown keys.* context `{}`", key);
+        }
+    }
+
+    if let Some(v) = table.get("global") {
+        warn_unknown_in_context(v, "global", &["quit", "search", "help"]);
+    }
+    if let Some(v) = table.get("search_input") {
+        warn_unknown_in_context(v, "search_input", &["cancel", "confirm"]);
+    }
+    if let Some(v) = table.get("search_results") {
+        warn_unknown_in_context(
+            v,
+            "search_results",
+            &[
+                "cancel",
+                "confirm",
+                "next",
+                "prev",
+                "page_down",
+                "page_up",
+                "mark",
+                "merge",
+                "toggle_marked",
+            ],
+        );
+    }
+    if let Some(v) = table.get("navigation") {
+        warn_unknown_in_context(
+            v,
+            "navigation",
+            &[
+                "next",
+                "prev",
+                "tab_next",
+                "tab_prev",
+                "edit",
+                "copy",
+                "confirm",
+                "add_alias",
+                "photo_fetch",
+                "lang_cycle",
+            ],
+        );
+    }
+    if let Some(v) = table.get("modal") {
+        warn_unknown_in_context(
+            v,
+            "modal",
+            &["cancel", "confirm", "next", "prev", "edit", "copy", "set_default"],
+        );
+    }
+    if let Some(v) = table.get("editor") {
+        warn_unknown_in_context(v, "editor", &["cancel", "confirm"]);
+    }
+}
+
+fn warn_unknown_in_context(value: &toml::Value, context: &str, known: &[&str]) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known_set: HashSet<&str> = known.iter().copied().collect();
+    for key in table.keys() {
+        if !known_set.contains(key.as_str()) {
+            eprintln!("warning: unknown keys.{}.* entry `{}`", context, key);
+        }
     }
 }
 
@@ -362,6 +974,10 @@ fn warn_unknown_commands_keys(value: &toml::Value) {
         }
     }
 }
+
+// =============================================================================
+// UI config types
+// =============================================================================
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -488,6 +1104,10 @@ impl From<UiFile> for UiConfig {
         }
     }
 }
+
+// =============================================================================
+// Commands config
+// =============================================================================
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]

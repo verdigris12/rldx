@@ -52,4 +52,24 @@ impl DetailTab {
             _ => None,
         }
     }
+
+    /// Get the next tab, or None if at the end
+    pub fn next(self) -> Option<Self> {
+        match self {
+            DetailTab::Work => Some(DetailTab::Personal),
+            DetailTab::Personal => Some(DetailTab::Accounts),
+            DetailTab::Accounts => Some(DetailTab::Metadata),
+            DetailTab::Metadata => None,
+        }
+    }
+
+    /// Get the previous tab, or None if at the beginning
+    pub fn prev(self) -> Option<Self> {
+        match self {
+            DetailTab::Work => None,
+            DetailTab::Personal => Some(DetailTab::Work),
+            DetailTab::Accounts => Some(DetailTab::Personal),
+            DetailTab::Metadata => Some(DetailTab::Accounts),
+        }
+    }
 }
