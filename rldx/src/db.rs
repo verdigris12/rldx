@@ -129,16 +129,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn clear_all(&mut self) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Deleting from items cascades to props via FK
-        tx.execute("DELETE FROM items", [])?;
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn reset_schema(&mut self) -> Result<()> {
         // Drop and recreate schema from scratch
         let tx = self
