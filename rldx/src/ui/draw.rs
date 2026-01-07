@@ -21,6 +21,7 @@ const MULTIVALUE_HELP: &str =
 const SEARCH_HELP_INPUT: &str =
     "Type to filter  Esc: focus results  Enter: open";
 const ADD_ALIAS_HELP: &str = "Type alias  Enter: add  Esc: cancel";
+const HELP_MODAL_FOOTER: &str = "j/k: scroll  Esc/q: close";
 
 pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     terminal.draw(|frame| draw_frame(frame, app))?;
@@ -44,6 +45,7 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App) {
     draw_alias_modal(frame, size, app);
     draw_multivalue_modal(frame, size, app);
     draw_confirm_modal(frame, size, app);
+    draw_help_modal(frame, size, app);
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -451,6 +453,128 @@ fn draw_confirm_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         .border_style(border_style(app, true));
 
     frame.render_stateful_widget_ref(popup, area, &mut app.modal_popup);
+}
+
+fn draw_help_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if app.help_modal.is_none() {
+        return;
+    }
+
+    // Calculate modal size: 2/3 width, 80% height
+    let width = area.width.saturating_mul(2).saturating_div(3).max(40).min(area.width);
+    let height = area.height.saturating_mul(4).saturating_div(5).max(10).min(area.height);
+
+    // Center the modal
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    // Clear the area behind the modal
+    frame.render_widget(Clear, modal_area);
+
+    // Get styles before any mutable borrows
+    let header_style = header_text_style(app);
+    let border_s = border_style(app, true);
+
+    // Build the help content
+    let sections = app.help_entries();
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Calculate column widths for alignment
+    let content_width = width.saturating_sub(4) as usize; // Account for borders and padding
+    let action_width = 20usize;
+
+    for (section_idx, section) in sections.iter().enumerate() {
+        // Section header
+        let header_text = format!(" {} ", section.title);
+        let padding_total = content_width.saturating_sub(header_text.len());
+        let left_pad = padding_total / 2;
+        let right_pad = padding_total - left_pad;
+        let header_line = format!(
+            "{}{}{}",
+            "═".repeat(left_pad),
+            header_text,
+            "═".repeat(right_pad)
+        );
+        lines.push(Line::from(Span::styled(header_line, header_style)));
+
+        // Section entries
+        for entry in &section.entries {
+            let action = format!("{:<width$}", entry.action, width = action_width);
+            let keys = &entry.keys;
+            lines.push(Line::from(vec![
+                Span::styled(action, Style::default()),
+                Span::styled(keys.clone(), header_style),
+            ]));
+        }
+
+        // Blank line between sections (except after the last one)
+        if section_idx < sections.len() - 1 {
+            lines.push(Line::from(""));
+        }
+    }
+
+    let total_lines = lines.len();
+    // Viewport height is the inner height minus space for footer
+    let inner_height = height.saturating_sub(3) as usize; // borders (2) + footer line (1)
+
+    // Now we can safely mutate the modal
+    let modal = app.help_modal.as_mut().unwrap();
+    modal.total_lines = total_lines;
+    modal.viewport_height = inner_height;
+
+    // Clamp scroll to valid range
+    let max_scroll = modal.total_lines.saturating_sub(modal.viewport_height);
+    if modal.scroll > max_scroll {
+        modal.scroll = max_scroll;
+    }
+
+    let scroll = modal.scroll;
+    let viewport_height = modal.viewport_height;
+    let can_scroll_up = modal.can_scroll_up();
+    let can_scroll_down = modal.can_scroll_down();
+
+    // Apply scroll offset
+    let visible_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll)
+        .take(viewport_height)
+        .collect();
+
+    // Build scroll indicators
+    let scroll_indicator = match (can_scroll_up, can_scroll_down) {
+        (true, true) => "▲▼",
+        (true, false) => "▲ ",
+        (false, true) => " ▼",
+        (false, false) => "  ",
+    };
+
+    // Build the title with scroll indicator
+    let title = Line::from(vec![
+        Span::styled(" HELP ", header_style),
+        Span::styled(scroll_indicator, header_style),
+    ]);
+
+    // Build footer
+    let footer = Line::from(Span::styled(
+        format!(" {} ", HELP_MODAL_FOOTER),
+        header_style,
+    ));
+
+    // Create the block with title and footer
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_s)
+        .title(title)
+        .title_bottom(footer)
+        .title_alignment(Alignment::Center);
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Render the content as a paragraph
+    let paragraph = Paragraph::new(visible_lines);
+    frame.render_widget(paragraph, inner);
 }
 
 fn draw_image(frame: &mut Frame<'_>, area: Rect, app: &mut App) {

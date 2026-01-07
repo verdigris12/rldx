@@ -182,6 +182,64 @@ pub struct AliasModal {
     pub input: Input,
 }
 
+/// Help modal state with scroll support
+#[derive(Debug, Clone)]
+pub struct HelpModal {
+    /// Current scroll offset (line index at top of viewport)
+    pub scroll: usize,
+    /// Total number of content lines
+    pub total_lines: usize,
+    /// Viewport height (set during rendering)
+    pub viewport_height: usize,
+}
+
+impl HelpModal {
+    pub fn new(total_lines: usize) -> Self {
+        Self {
+            scroll: 0,
+            total_lines,
+            viewport_height: 10, // Will be updated during render
+        }
+    }
+
+    pub fn scroll_down(&mut self, lines: usize) {
+        let max_scroll = self.total_lines.saturating_sub(self.viewport_height);
+        self.scroll = (self.scroll + lines).min(max_scroll);
+    }
+
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll = 0;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll = self.total_lines.saturating_sub(self.viewport_height);
+    }
+
+    pub fn can_scroll_up(&self) -> bool {
+        self.scroll > 0
+    }
+
+    pub fn can_scroll_down(&self) -> bool {
+        self.scroll + self.viewport_height < self.total_lines
+    }
+}
+
+/// A section in the help modal (e.g., "Global", "Navigation")
+pub struct HelpSection {
+    pub title: &'static str,
+    pub entries: Vec<HelpEntry>,
+}
+
+/// A single help entry (action name + key bindings)
+pub struct HelpEntry {
+    pub action: &'static str,
+    pub keys: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct MultiValueModal {
     field: MultiValueField,
@@ -275,6 +333,8 @@ pub struct App<'a> {
     pub confirm_modal: Option<ConfirmModal>,
     // Add-alias modal
     pub alias_modal: Option<AliasModal>,
+    // Help modal (F1)
+    pub help_modal: Option<HelpModal>,
 }
 
 impl<'a> App<'a> {
@@ -312,6 +372,7 @@ impl<'a> App<'a> {
             modal_popup: PopupState::default(),
             confirm_modal: None,
             alias_modal: None,
+            help_modal: None,
         };
         app.rebuild_search_rows();
         app.load_selection()?;
@@ -365,6 +426,18 @@ impl<'a> App<'a> {
             return Ok(true);
         }
 
+        // F1 always opens help (hardcoded)
+        if matches!(key.code, KeyCode::F(1)) {
+            self.show_help();
+            return Ok(false);
+        }
+
+        // If help modal is open, handle its keys first
+        if self.help_modal.is_some() {
+            self.handle_help_modal_key(key);
+            return Ok(false);
+        }
+
         // Route to context-specific handlers first
         if self.editor.active && self.handle_editor_key(key)? {
             return Ok(false);
@@ -411,9 +484,9 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        // Global: help (not yet implemented)
+        // Global: help
         if self.key_matches_any(&key, &global.help) {
-            self.set_status("Help is not yet implemented");
+            self.show_help();
             return Ok(false);
         }
 
@@ -549,6 +622,12 @@ impl<'a> App<'a> {
             SearchFocus::Results => {
                 let results_keys = &self.config.keys.search_results;
                 let global_keys = &self.config.keys.global;
+
+                // Global: help
+                if self.key_matches_any(&key, &global_keys.help) {
+                    self.show_help();
+                    return Ok(true);
+                }
 
                 // Global: search key refocuses input
                 if self.key_matches_any(&key, &global_keys.search) {
@@ -1668,6 +1747,241 @@ impl<'a> App<'a> {
                     false
                 }
             }
+        }
+    }
+
+    // =========================================================================
+    // Help Modal
+    // =========================================================================
+
+    /// Generate help content from current keybindings configuration
+    pub fn help_entries(&self) -> Vec<HelpSection> {
+        let keys = &self.config.keys;
+
+        vec![
+            HelpSection {
+                title: "Global",
+                entries: vec![
+                    HelpEntry {
+                        action: "Quit",
+                        keys: keys.global.quit.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Search",
+                        keys: keys.global.search.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Help",
+                        keys: keys.global.help.join(", "),
+                    },
+                ],
+            },
+            HelpSection {
+                title: "Search Input",
+                entries: vec![
+                    HelpEntry {
+                        action: "Cancel",
+                        keys: keys.search_input.cancel.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Confirm",
+                        keys: keys.search_input.confirm.join(", "),
+                    },
+                ],
+            },
+            HelpSection {
+                title: "Search Results",
+                entries: vec![
+                    HelpEntry {
+                        action: "Cancel",
+                        keys: keys.search_results.cancel.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Confirm",
+                        keys: keys.search_results.confirm.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Next",
+                        keys: keys.search_results.next.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Previous",
+                        keys: keys.search_results.prev.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Page Down",
+                        keys: keys.search_results.page_down.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Page Up",
+                        keys: keys.search_results.page_up.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Mark",
+                        keys: keys.search_results.mark.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Merge",
+                        keys: keys.search_results.merge.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Toggle Marked",
+                        keys: keys.search_results.toggle_marked.join(", "),
+                    },
+                ],
+            },
+            HelpSection {
+                title: "Navigation",
+                entries: vec![
+                    HelpEntry {
+                        action: "Next",
+                        keys: keys.navigation.next.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Previous",
+                        keys: keys.navigation.prev.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Tab Next",
+                        keys: keys.navigation.tab_next.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Tab Previous",
+                        keys: keys.navigation.tab_prev.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Edit",
+                        keys: keys.navigation.edit.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Copy",
+                        keys: keys.navigation.copy.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Confirm",
+                        keys: keys.navigation.confirm.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Add Alias",
+                        keys: keys.navigation.add_alias.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Fetch Photo",
+                        keys: keys.navigation.photo_fetch.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Cycle Language",
+                        keys: keys.navigation.lang_cycle.join(", "),
+                    },
+                ],
+            },
+            HelpSection {
+                title: "Modal",
+                entries: vec![
+                    HelpEntry {
+                        action: "Cancel",
+                        keys: keys.modal.cancel.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Confirm",
+                        keys: keys.modal.confirm.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Next",
+                        keys: keys.modal.next.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Previous",
+                        keys: keys.modal.prev.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Edit",
+                        keys: keys.modal.edit.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Copy",
+                        keys: keys.modal.copy.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Set Default",
+                        keys: keys.modal.set_default.join(", "),
+                    },
+                ],
+            },
+            HelpSection {
+                title: "Editor",
+                entries: vec![
+                    HelpEntry {
+                        action: "Cancel",
+                        keys: keys.editor.cancel.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Confirm",
+                        keys: keys.editor.confirm.join(", "),
+                    },
+                ],
+            },
+        ]
+    }
+
+    /// Calculate total number of lines in help content
+    fn help_total_lines(&self) -> usize {
+        let sections = self.help_entries();
+        let mut total = 0;
+        for section in &sections {
+            total += 1; // Section header
+            total += section.entries.len(); // Entries
+            total += 1; // Blank line after section
+        }
+        total
+    }
+
+    /// Open the help modal
+    pub fn show_help(&mut self) {
+        let total_lines = self.help_total_lines();
+        self.help_modal = Some(HelpModal::new(total_lines));
+    }
+
+    /// Handle keys when help modal is open
+    fn handle_help_modal_key(&mut self, key: KeyEvent) {
+        // Close on Escape or q
+        if matches!(key.code, KeyCode::Esc) || matches!(key.code, KeyCode::Char('q')) {
+            self.help_modal = None;
+            return;
+        }
+
+        let Some(modal) = self.help_modal.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            // Scroll down
+            KeyCode::Char('j') | KeyCode::Down => {
+                modal.scroll_down(1);
+            }
+            // Scroll up
+            KeyCode::Char('k') | KeyCode::Up => {
+                modal.scroll_up(1);
+            }
+            // Page down
+            KeyCode::PageDown => {
+                let page = modal.viewport_height.saturating_sub(1).max(1);
+                modal.scroll_down(page);
+            }
+            // Page up
+            KeyCode::PageUp => {
+                let page = modal.viewport_height.saturating_sub(1).max(1);
+                modal.scroll_up(page);
+            }
+            // Scroll to top
+            KeyCode::Char('g') | KeyCode::Home => {
+                modal.scroll_to_top();
+            }
+            // Scroll to bottom
+            KeyCode::Char('G') | KeyCode::End => {
+                modal.scroll_to_bottom();
+            }
+            _ => {}
         }
     }
 }
