@@ -1642,11 +1642,11 @@ impl<'a> App<'a> {
             "f10" => matches!(event.code, KeyCode::F(10)),
             "f11" => matches!(event.code, KeyCode::F(11)),
             "f12" => matches!(event.code, KeyCode::F(12)),
-            // Single character (case-insensitive for letters)
+            // Single character - case-sensitive (m != M, since M requires Shift)
             _ => {
                 let mut chars = trimmed.chars();
                 if let (Some(first), None) = (chars.next(), chars.next()) {
-                    matches!(event.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&first))
+                    matches!(event.code, KeyCode::Char(c) if c == first)
                 } else {
                     false
                 }

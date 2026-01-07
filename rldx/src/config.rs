@@ -521,9 +521,18 @@ impl From<EditorKeysFile> for EditorKeys {
 // Key binding validation
 // =============================================================================
 
-/// Normalize a key binding string to a canonical form for collision detection
+/// Normalize a key binding string to a canonical form for collision detection.
+/// Single characters preserve case (since 'M' means Shift+m, different from 'm').
+/// Multi-character key names are case-insensitive (Enter, ENTER, enter are the same).
 fn normalize_binding(binding: &str) -> String {
-    binding.trim().to_ascii_lowercase()
+    let trimmed = binding.trim();
+    if trimmed.len() == 1 {
+        // Single character: preserve case (m != M)
+        trimmed.to_string()
+    } else {
+        // Special key names: case-insensitive
+        trimmed.to_ascii_lowercase()
+    }
 }
 
 /// Check for collisions within a single context

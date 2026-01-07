@@ -1,0 +1,29 @@
+# Path to the directory containing your vCard files.
+vdir = "/home/monday/contacts"
+
+# Optional: override which fields appear in the first pane.
+# fields_first_pane = ["fname", "mname", "lname", "alias", "phone", "email"]
+
+[ui.colors]
+# RGB values for the UI theme.
+border = [255, 140, 0]
+selection_bg = [255, 140, 0]
+selection_fg = [0, 0, 0]
+separator = [255, 140, 0]
+status_fg = [255, 140, 0]
+status_bg = [0, 0, 0]
+
+[ui.icons]
+address_book = " "
+contact = " "
+organization = " "
+[ui.pane.image]
+# Width of the image pane in characters.
+width = 30
+height = 15
+
+[commands]
+# Program that receives copied values on stdin.
+copy = ["xclip"]
+
+phone_region = "RU"

@@ -157,7 +157,7 @@ copy = ["wl-copy"]  # or ["xclip", "-selection", "clipboard"]
 ```
 
 **Supported key names:**
-- Single characters: `"a"`, `"A"`, `"/"`, `"?"`, etc.
+- Single characters: `"a"`, `"A"`, `"/"`, `"?"`, etc. (case-sensitive: `"m"` != `"M"`)
 - Special keys: `"Enter"`, `"Escape"`, `"Tab"`, `"Backtab"`, `"Space"`, `"Backspace"`
 - Arrow keys: `"Up"`, `"Down"`, `"Left"`, `"Right"`
 - Navigation: `"PageUp"`, `"PageDown"`, `"Home"`, `"End"`
@@ -165,6 +165,7 @@ copy = ["wl-copy"]  # or ["xclip", "-selection", "clipboard"]
 
 **Notes:**
 
+- Single-character bindings are CASE-SENSITIVE (`"M"` requires Shift, different from `"m"`)
 - Ctrl/Alt/Super modifiers are NOT supported
 - Unknown keys log a warning and are ignored
 - Key binding collisions within a context cause startup failure

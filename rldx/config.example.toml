@@ -12,12 +12,13 @@ vdir = "/path/to/your/vdir"
 # =============================================================================
 # Keys are organized by context. Each action can have multiple bindings.
 # Supported key names:
-#   - Single characters: "a", "A", "/", "?", etc.
+#   - Single characters: "a", "A", "/", "?", etc. (case-sensitive: "m" != "M")
 #   - Special keys: "Enter", "Escape", "Tab", "Backtab", "Space", "Backspace"
 #   - Arrow keys: "Up", "Down", "Left", "Right"
 #   - Navigation: "PageUp", "PageDown", "Home", "End"
 #   - Function keys: "F1" through "F12"
 #
+# Note: Single-character bindings are CASE-SENSITIVE ("M" requires Shift).
 # Note: Ctrl/Alt/Super modifiers are NOT supported.
 # Key bindings within each context must not collide.
 
