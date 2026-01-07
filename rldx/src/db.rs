@@ -34,7 +34,6 @@ pub struct IndexedProp {
 pub struct StoredItem {
     pub path: PathBuf,
     pub sha1: Vec<u8>,
-    pub mtime: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -311,13 +310,12 @@ impl Database {
     }
 
     pub fn stored_items(&self) -> Result<HashMap<PathBuf, StoredItem>> {
-        let mut stmt = self.conn.prepare("SELECT path, sha1, mtime FROM items")?;
+        let mut stmt = self.conn.prepare("SELECT path, sha1 FROM items")?;
         let rows = stmt.query_map([], |row| {
             let path: String = row.get(0)?;
             Ok(StoredItem {
                 path: PathBuf::from(path),
                 sha1: row.get(1)?,
-                mtime: row.get(2)?,
             })
         })?;
 

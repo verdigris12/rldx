@@ -114,19 +114,25 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
     let stored = if force { Default::default() } else { db.stored_items()? };
 
     for path in files {
-        let mut state = vdir::compute_file_state(&path)?;
-        let mut requires_index = force;
+        let state = vdir::compute_file_state(&path)?;
+
+        // Only check SHA1, ignore mtime (handles rsync, backup restore, etc.)
+        let requires_index = if force {
+            true
+        } else {
+            match stored.get(&path) {
+                Some(existing) => existing.sha1 != state.sha1,
+                None => true,
+            }
+        };
 
         if !requires_index {
-            requires_index = match stored.get(&path) {
-                Some(existing) => existing.sha1 != state.sha1 || existing.mtime != state.mtime,
-                None => true,
-            };
+            continue;
         }
 
+        // Only parse files that need reindexing
         let parsed = vcard_io::parse_file(&path, config.phone_region.as_deref())?;
         let cards = parsed.cards;
-        let changed = parsed.changed;
 
         if cards.is_empty() {
             eprintln!("warning: file {} contained no vCards", path.display());
@@ -140,16 +146,16 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
             );
         }
 
-        if changed {
-            state = vdir::compute_file_state(&path)?;
-            requires_index = true;
-        }
+        // If parsing normalized the file, recompute state for accurate DB storage
+        let final_state = if parsed.changed {
+            vdir::compute_file_state(&path)?
+        } else {
+            state
+        };
 
-        if force || requires_index {
-            let card = cards.into_iter().next().unwrap();
-            let record = indexer::build_record(&path, &card, &state, None)?;
-            db.upsert(&record.item, &record.props)?;
-        }
+        let card = cards.into_iter().next().unwrap();
+        let record = indexer::build_record(&path, &card, &final_state, None)?;
+        db.upsert(&record.item, &record.props)?;
     }
 
     db.remove_missing(&paths_set)?;
