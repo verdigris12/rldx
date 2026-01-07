@@ -610,6 +610,16 @@ impl<'a> App<'a> {
                     return Ok(true);
                 }
 
+                // Next/prev: navigate results while typing
+                if self.key_matches_any(&key, &input_keys.next) {
+                    self.move_selection(1)?;
+                    return Ok(true);
+                }
+                if self.key_matches_any(&key, &input_keys.prev) {
+                    self.move_selection(-1)?;
+                    return Ok(true);
+                }
+
                 // Pass other keys to the input widget
                 if let Some(change) = self.search_input.handle_event(&Event::Key(key)) {
                     if change.value {
@@ -1786,6 +1796,14 @@ impl<'a> App<'a> {
                     HelpEntry {
                         action: "Confirm",
                         keys: keys.search_input.confirm.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Next",
+                        keys: keys.search_input.next.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Previous",
+                        keys: keys.search_input.prev.join(", "),
                     },
                 ],
             },

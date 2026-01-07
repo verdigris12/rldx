@@ -106,6 +106,8 @@ pub struct GlobalKeys {
 pub struct SearchInputKeys {
     pub cancel: Vec<String>,
     pub confirm: Vec<String>,
+    pub next: Vec<String>,
+    pub prev: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +186,8 @@ impl Default for SearchInputKeys {
         Self {
             cancel: vec!["Escape".into()],
             confirm: vec!["Enter".into()],
+            next: vec!["Tab".into()],
+            prev: vec!["Backtab".into()],
         }
     }
 }
@@ -305,6 +309,8 @@ impl Default for GlobalKeysFile {
 struct SearchInputKeysFile {
     cancel: KeyBinding,
     confirm: KeyBinding,
+    next: KeyBinding,
+    prev: KeyBinding,
 }
 
 impl Default for SearchInputKeysFile {
@@ -313,6 +319,8 @@ impl Default for SearchInputKeysFile {
         Self {
             cancel: KeyBinding::Multiple(defaults.cancel),
             confirm: KeyBinding::Multiple(defaults.confirm),
+            next: KeyBinding::Multiple(defaults.next),
+            prev: KeyBinding::Multiple(defaults.prev),
         }
     }
 }
@@ -457,6 +465,8 @@ impl From<SearchInputKeysFile> for SearchInputKeys {
         Self {
             cancel: file.cancel.into_vec(),
             confirm: file.confirm.into_vec(),
+            next: file.next.into_vec(),
+            prev: file.prev.into_vec(),
         }
     }
 }
