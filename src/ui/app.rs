@@ -350,14 +350,15 @@ impl MultiValueModal {
     }
 }
 
-/// A field in the details pane with TYPE/NOTE columns
+/// A field in the details pane with property columns
 #[derive(Debug, Clone)]
 pub struct DetailsField {
     pub label: String,
     pub value: String,
     pub copy_value: String,
-    pub types: Vec<String>,     // TYPE parameter values (WORK, HOME, CELL, etc.)
-    pub note: Option<String>,   // NOTE parameter
+    /// Property parameters as name -> list of values (e.g., "TYPE" -> ["CELL", "WORK"])
+    /// Excludes PREF which is handled separately in multivalue fields
+    pub params: std::collections::HashMap<String, Vec<String>>,
     pub source: Option<FieldRef>,
 }
 
@@ -3571,14 +3572,8 @@ fn build_details_sections(
 fn build_details_field(prop: &PropRow, default_region: Option<&str>) -> DetailsField {
     let field_upper = prop.field.to_uppercase();
     
-    // Extract TYPE values as a list
-    let types = extract_type_list(&prop.params);
-    
-    // Extract NOTE parameter
-    let note = prop.params.get("note")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    // Extract all parameters (except PREF which is handled in multivalue fields)
+    let params = extract_field_params(&prop.params);
     
     // Format value based on field type
     let (label, value, copy_value) = match field_upper.as_str() {
@@ -3621,10 +3616,48 @@ fn build_details_field(prop: &PropRow, default_region: Option<&str>) -> DetailsF
         label: display_label,
         value,
         copy_value,
-        types,
-        note,
+        params,
         source: Some(FieldRef::new(prop.field.clone(), prop.seq)),
     }
+}
+
+/// Extract all field parameters as a map of name -> values
+/// Excludes PREF (handled in multivalue fields) and VALUE (internal vCard param)
+fn extract_field_params(params: &Value) -> std::collections::HashMap<String, Vec<String>> {
+    use std::collections::HashMap;
+    
+    let mut result: HashMap<String, Vec<String>> = HashMap::new();
+    
+    let Some(obj) = params.as_object() else {
+        return result;
+    };
+    
+    for (key, value) in obj {
+        let key_upper = key.to_uppercase();
+        
+        // Skip PREF (handled in multivalue) and VALUE (internal vCard param)
+        if key_upper == "PREF" || key_upper == "VALUE" {
+            continue;
+        }
+        
+        let values = match value {
+            Value::String(s) if !s.is_empty() => vec![s.to_uppercase()],
+            Value::Array(items) => {
+                items.iter()
+                    .filter_map(|item| item.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_uppercase())
+                    .collect()
+            }
+            _ => continue,
+        };
+        
+        if !values.is_empty() {
+            result.insert(key_upper, values);
+        }
+    }
+    
+    result
 }
 
 /// Extract TYPE parameter as a list of strings

@@ -968,9 +968,9 @@ fn draw_details_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
         // Blank line after section separator
         lines.push(Line::from(""));
         
-        // Collect all unique TYPE values for this section to build column headers
-        let type_columns = collect_section_type_columns(section);
-        let has_note_column = section.fields.iter().any(|f| f.note.is_some());
+        // Collect property columns for this section
+        // Each property (e.g., TYPE, NOTE) gets columns equal to max values across fields
+        let prop_columns = collect_section_property_columns(section);
         
         // Calculate column widths for this section
         let label_width = section.fields.iter()
@@ -979,14 +979,20 @@ fn draw_details_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .unwrap_or(0)
             .max(5); // Minimum label width
         
-        // Add column header row if there are type columns or notes
-        if !type_columns.is_empty() || has_note_column {
+        // Calculate max value width for alignment
+        let value_width = section.fields.iter()
+            .map(|f| f.value.len())
+            .max()
+            .unwrap_or(0)
+            .max(10); // Minimum value width
+        
+        // Add column header row if there are property columns
+        if !prop_columns.is_empty() {
             let header_line = build_section_column_header(
                 app,
                 label_width,
-                &type_columns,
-                has_note_column,
-                content_area.width as usize,
+                value_width,
+                &prop_columns,
             );
             lines.push(header_line);
         }
@@ -1000,8 +1006,8 @@ fn draw_details_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 field,
                 highlight,
                 label_width,
-                &type_columns,
-                has_note_column,
+                value_width,
+                &prop_columns,
             );
             lines.push(line);
             flat_field_index += 1;
@@ -1056,51 +1062,69 @@ fn render_section_header(name: &str, width: usize) -> String {
     format!("{}{}", name_part, dashes)
 }
 
-/// Collect all unique TYPE values from a section's fields
-fn collect_section_type_columns(section: &DetailsSection) -> Vec<String> {
-    use std::collections::BTreeSet;
-    let mut types: BTreeSet<String> = BTreeSet::new();
-    for field in &section.fields {
-        for t in &field.types {
-            types.insert(t.clone());
-        }
-    }
-    types.into_iter().collect()
+/// Property column info: name and number of columns needed
+#[derive(Debug, Clone)]
+struct PropColumn {
+    name: String,
+    count: usize,  // Number of columns (max values across all fields)
+    width: usize,  // Column width (max value length + padding)
 }
 
-/// Build column header row for a section: spaces for label+value, then TYPE TYPE NOTE headers
+/// Collect property columns for a section
+/// Returns list of (property_name, column_count, column_width)
+fn collect_section_property_columns(section: &DetailsSection) -> Vec<PropColumn> {
+    use std::collections::BTreeMap;
+    
+    // Track max value count and max value width for each property
+    let mut prop_info: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // name -> (max_count, max_width)
+    
+    for field in &section.fields {
+        for (prop_name, values) in &field.params {
+            let entry = prop_info.entry(prop_name.clone()).or_insert((0, 0));
+            // Update max count
+            entry.0 = entry.0.max(values.len());
+            // Update max width
+            for v in values {
+                entry.1 = entry.1.max(v.len());
+            }
+        }
+    }
+    
+    // Convert to PropColumn list
+    prop_info.into_iter()
+        .map(|(name, (count, max_width))| PropColumn {
+            name,
+            count,
+            width: max_width.max(4) + 1, // At least 4 chars + 1 space padding
+        })
+        .collect()
+}
+
+/// Build column header row for a section
+/// Format: (padding for label+value) then property headers
 fn build_section_column_header(
     app: &App,
     label_width: usize,
-    type_columns: &[String],
-    has_note: bool,
-    _total_width: usize,
+    value_width: usize,
+    prop_columns: &[PropColumn],
 ) -> Line<'static> {
     let header_style = header_text_style(app);
     
-    // Start with padding for label and value columns
-    // Label column: label_width + ": "
-    let label_col_width = label_width + 2;
-    
-    // We'll leave the value column flexible, headers start after a gap
     let mut spans: Vec<Span> = Vec::new();
     
-    // Padding for label column
+    // Padding for label column (label_width + ": ")
+    let label_col_width = label_width + 2;
     spans.push(Span::raw(" ".repeat(label_col_width)));
     
-    // Value column gets some minimum space, then TYPE headers
-    // The value takes remaining space, but we want to align TYPE headers
-    // For simplicity, add a gap then the headers
-    spans.push(Span::raw("  ")); // gap after value area starts
+    // Padding for value column + gap
+    spans.push(Span::raw(" ".repeat(value_width + 1)));
     
-    // TYPE column headers
-    for type_name in type_columns {
-        spans.push(Span::styled(format!("{:<6}", type_name), header_style));
-    }
-    
-    // NOTE column header
-    if has_note {
-        spans.push(Span::styled("NOTE", header_style));
+    // Property column headers
+    for prop in prop_columns {
+        // One header per column (repeated if count > 1)
+        for _ in 0..prop.count {
+            spans.push(Span::styled(format!("{:<width$}", prop.name, width = prop.width), header_style));
+        }
     }
     
     Line::from(spans)
@@ -1112,8 +1136,8 @@ fn build_details_field_line(
     field: &DetailsField,
     highlight: bool,
     label_width: usize,
-    type_columns: &[String],
-    has_note_column: bool,
+    value_width: usize,
+    prop_columns: &[PropColumn],
 ) -> Line<'static> {
     let (label_style, value_style) = line_styles(app, highlight);
     
@@ -1123,27 +1147,24 @@ fn build_details_field_line(
     let label_text = format!("{:width$}: ", field.label, width = label_width);
     spans.push(Span::styled(label_text, label_style));
     
-    // Value - for now show the value, later we might truncate
-    spans.push(Span::styled(field.value.clone(), value_style));
+    // Value column (right-padded to value_width)
+    let value_text = format!("{:<width$}", field.value, width = value_width);
+    spans.push(Span::styled(value_text, value_style));
     
-    // Add spacing before TYPE columns (if any)
-    if !type_columns.is_empty() || has_note_column {
-        spans.push(Span::raw("  "));
+    // Gap before property columns
+    if !prop_columns.is_empty() {
+        spans.push(Span::raw(" "));
     }
     
-    // TYPE columns - show type name if field has it, else empty
-    for type_name in type_columns {
-        if field.types.contains(type_name) {
-            spans.push(Span::styled(format!("{:<6}", type_name), value_style));
-        } else {
-            spans.push(Span::raw("      ")); // 6 spaces to match column width
-        }
-    }
-    
-    // NOTE column
-    if has_note_column {
-        if let Some(note) = &field.note {
-            spans.push(Span::styled(note.clone(), value_style));
+    // Property columns - fill with values or empty space
+    for prop in prop_columns {
+        let values = field.params.get(&prop.name);
+        for i in 0..prop.count {
+            let cell = values
+                .and_then(|v| v.get(i))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            spans.push(Span::styled(format!("{:<width$}", cell, width = prop.width), value_style));
         }
     }
     
