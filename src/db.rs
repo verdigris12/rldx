@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
@@ -79,22 +79,30 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open the database without encryption
+    /// Open the database without encryption at the default location
     pub fn open() -> Result<Self> {
-        Self::open_with_key(None)
+        let base = BaseDirs::new().context("unable to determine data directories")?;
+        let data_dir = base.data_dir().join("rldx");
+        let db_path = data_dir.join("index.db");
+        Self::open_at(&db_path, None)
     }
 
-    /// Open the database with optional SQLCipher encryption key
+    /// Open the database with optional SQLCipher encryption key at the specified path
     ///
     /// The key should be in SQLCipher PRAGMA key format:
     /// - Empty string for no encryption
     /// - `x'<hex>'` for raw key bytes (e.g., `x'2DD29CA851E7B56E4697B0E1F08507293D761A05CE4D1B628663F411A8086D99'`)
-    pub fn open_with_key(encryption_key: Option<&str>) -> Result<Self> {
-        let base = BaseDirs::new().context("unable to determine data directories")?;
-        let data_dir = base.data_dir().join("rldx");
-        fs::create_dir_all(&data_dir)?;
-        let db_path = data_dir.join("index.db");
-        let conn = Connection::open(&db_path)?;
+    pub fn open_with_key(db_path: &Path, encryption_key: Option<&str>) -> Result<Self> {
+        Self::open_at(db_path, encryption_key)
+    }
+
+    /// Internal: open database at path with optional encryption
+    fn open_at(db_path: &Path, encryption_key: Option<&str>) -> Result<Self> {
+        // Ensure parent directory exists
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(db_path)?;
 
         let mut db = Self { conn };
 

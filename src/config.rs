@@ -14,6 +14,7 @@ const APP_NAME: &str = "rldx";
 pub struct Config {
     pub config_path: PathBuf,
     pub vdir: PathBuf,
+    pub db_path: PathBuf,
     pub fields_first_pane: Vec<String>,
     pub phone_region: Option<String>,
     pub keys: Keys,
@@ -978,6 +979,7 @@ fn validate_key_bindings(keys: &Keys) -> Result<()> {
 #[serde(default)]
 struct ConfigFile {
     vdir: Option<PathBuf>,
+    db_path: Option<PathBuf>,
     #[serde(default = "default_fields_first_pane")]
     fields_first_pane: Vec<String>,
     phone_region: Option<String>,
@@ -999,6 +1001,7 @@ impl Default for ConfigFile {
     fn default() -> Self {
         Self {
             vdir: None,
+            db_path: None,
             fields_first_pane: default_fields_first_pane(),
             phone_region: None,
             keys: KeysFile::default(),
@@ -1191,6 +1194,13 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_root()?.join(CONFIG_FILE_NAME))
 }
 
+/// Get the default database path (~/.local/share/rldx/index.db)
+pub fn default_db_path() -> Result<PathBuf> {
+    let base = BaseDirs::new().context("unable to determine base directories")?;
+    let data_dir = base.data_dir().join(APP_NAME);
+    Ok(data_dir.join("index.db"))
+}
+
 pub fn ensure_config_dir() -> Result<()> {
     let dir = config_root()?;
     if !dir.exists() {
@@ -1245,6 +1255,12 @@ pub fn load_from(custom_path: Option<&Path>) -> Result<Config> {
         bail!("configured vdir does not exist: {}", vdir.display());
     }
 
+    // Handle db_path: use configured value or default
+    let db_path = match cfg_file.db_path {
+        Some(p) => expand_tilde(&p),
+        None => default_db_path()?,
+    };
+
     let phone_region = cfg_file
         .phone_region
         .as_ref()
@@ -1266,6 +1282,7 @@ pub fn load_from(custom_path: Option<&Path>) -> Result<Config> {
     Ok(Config {
         config_path: path,
         vdir,
+        db_path,
         fields_first_pane: cfg_file.fields_first_pane,
         phone_region,
         keys,
@@ -1288,6 +1305,7 @@ fn warn_unknown_keys(value: &toml::Value) {
 
     let known = HashSet::from([
         "vdir".to_string(),
+        "db_path".to_string(),
         "fields_first_pane".to_string(),
         "phone_region".to_string(),
         "keys".to_string(),

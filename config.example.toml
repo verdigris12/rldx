@@ -1,5 +1,6 @@
 # Path to the directory containing your vCard files.
-vdir = "/path/to/your/vdir"
+vdir = "~/.contacts"
+db_path = "~/.local/share/rldx/index.db"
 
 # =============================================================================
 # Top Bar Buttons
