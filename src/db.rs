@@ -205,7 +205,7 @@ impl Database {
         {
             let mut upd = tx.prepare("UPDATE items SET fn_norm = ?1 WHERE uuid = ?2")?;
             for (uuid, fun) in items_to_update {
-                let norm = fun.to_lowercase();
+                let norm = search::normalize(&fun);
                 let _ = upd.execute(params![norm, uuid])?;
             }
         }
@@ -237,7 +237,7 @@ impl Database {
                 "UPDATE props SET value_norm = ?1 WHERE uuid = ?2 AND field = ?3 AND seq = ?4 AND value = ?5",
             )?;
             for (uuid, field, seq, value) in props_to_update {
-                let norm = value.to_lowercase();
+                let norm = search::normalize(&value);
                 let _ = upd.execute(params![norm, uuid, field, seq, value])?;
             }
         }
@@ -270,7 +270,7 @@ impl Database {
                 item.uuid,
                 item.path.to_string_lossy(),
                 item.display_fn,
-                item.display_fn.to_lowercase(),
+                search::normalize(&item.display_fn),
                 item.rev,
                 if item.has_photo { 1 } else { 0 },
                 if item.has_logo { 1 } else { 0 },
@@ -296,7 +296,7 @@ impl Database {
                     item.display_fn,
                     prop.field,
                     prop.value,
-                    prop.value.to_lowercase(),
+                    search::normalize(&prop.value),
                     params_json,
                     prop.seq,
                 ])?;
