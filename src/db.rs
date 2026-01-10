@@ -9,6 +9,11 @@ use serde_json::Value;
 
 use crate::search;
 
+/// Compute SimHash for a normalized string (for fuzzy matching)
+pub fn compute_simhash(text: &str) -> u64 {
+    simhash::simhash(text)
+}
+
 #[derive(Debug, Clone)]
 pub struct IndexedItem {
     pub uuid: String,
@@ -98,6 +103,7 @@ impl Database {
               path TEXT UNIQUE NOT NULL,
               fn   TEXT NOT NULL,
               fn_norm TEXT,
+              fn_simhash INTEGER,
               rev  TEXT,
               has_photo INTEGER NOT NULL DEFAULT 0,
               has_logo  INTEGER NOT NULL DEFAULT 0,
@@ -121,12 +127,23 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_props_field ON props(field);
             CREATE INDEX IF NOT EXISTS idx_props_value ON props(value);
             CREATE INDEX IF NOT EXISTS idx_props_fn ON props(fn);
+
+            -- SimHash index for fuzzy name matching (FN and nicknames)
+            CREATE TABLE IF NOT EXISTS simhashes (
+              uuid TEXT NOT NULL REFERENCES items(uuid) ON DELETE CASCADE,
+              simhash INTEGER NOT NULL,
+              source TEXT NOT NULL,
+              value_norm TEXT NOT NULL,
+              PRIMARY KEY (uuid, simhash, source, value_norm)
+            );
+            CREATE INDEX IF NOT EXISTS idx_simhashes_simhash ON simhashes(simhash);
         "#,
         )?;
 
         // Migration for existing DBs: ensure columns exist and backfill
         self.ensure_norm_columns()?;
         self.backfill_norm_columns()?;
+        self.backfill_simhashes()?;
         // Create indexes that depend on newly added columns
         self.conn.execute_batch(
             r#"
@@ -144,6 +161,7 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(
             r#"
+            DROP TABLE IF EXISTS simhashes;
             DROP TABLE IF EXISTS props;
             DROP TABLE IF EXISTS items;
             "#,
@@ -170,24 +188,26 @@ impl Database {
 
     fn ensure_norm_columns(&mut self) -> Result<()> {
         if !self.column_exists("items", "fn_norm")? {
-            let _ = self
-                .conn
+            self.conn
                 .execute_batch("ALTER TABLE items ADD COLUMN fn_norm TEXT;")?;
         }
+        if !self.column_exists("items", "fn_simhash")? {
+            self.conn
+                .execute_batch("ALTER TABLE items ADD COLUMN fn_simhash INTEGER;")?;
+        }
         if !self.column_exists("props", "value_norm")? {
-            let _ = self
-                .conn
+            self.conn
                 .execute_batch("ALTER TABLE props ADD COLUMN value_norm TEXT;")?;
         }
         Ok(())
     }
 
     fn backfill_norm_columns(&mut self) -> Result<()> {
-        // items.fn_norm backfill
+        // items.fn_norm and fn_simhash backfill
         let items_to_update: Vec<(String, String)> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT uuid, fn FROM items WHERE fn_norm IS NULL OR fn_norm = ''")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT uuid, fn FROM items WHERE fn_norm IS NULL OR fn_norm = '' OR fn_simhash IS NULL",
+            )?;
             let rows = stmt.query_map([], |row| {
                 let uuid: String = row.get(0)?;
                 let fun: String = row.get(1)?;
@@ -203,10 +223,12 @@ impl Database {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
-            let mut upd = tx.prepare("UPDATE items SET fn_norm = ?1 WHERE uuid = ?2")?;
+            let mut upd =
+                tx.prepare("UPDATE items SET fn_norm = ?1, fn_simhash = ?2 WHERE uuid = ?3")?;
             for (uuid, fun) in items_to_update {
                 let norm = search::normalize(&fun);
-                let _ = upd.execute(params![norm, uuid])?;
+                let simhash = compute_simhash(&norm);
+                upd.execute(params![norm, simhash as i64, uuid])?;
             }
         }
         tx.commit()?;
@@ -246,19 +268,85 @@ impl Database {
         Ok(())
     }
 
+    /// Backfill simhashes table from existing items and props
+    fn backfill_simhashes(&mut self) -> Result<()> {
+        // Check if simhashes table is empty
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM simhashes", [], |row| row.get(0))?;
+
+        if count > 0 {
+            return Ok(()); // Already populated
+        }
+
+        // Collect FN simhashes from items
+        let fn_entries: Vec<(String, String, i64)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT uuid, fn_norm, fn_simhash FROM items WHERE fn_norm IS NOT NULL AND fn_simhash IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        // Collect NICKNAME simhashes from props
+        let nickname_entries: Vec<(String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT uuid, value_norm FROM props WHERE field = 'NICKNAME' AND value_norm IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        // Insert into simhashes table
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO simhashes (uuid, simhash, source, value_norm) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+
+            // Insert FN entries
+            for (uuid, fn_norm, simhash) in &fn_entries {
+                stmt.execute(params![uuid, simhash, "FN", fn_norm])?;
+            }
+
+            // Insert NICKNAME entries
+            for (uuid, nick_norm) in &nickname_entries {
+                let simhash = compute_simhash(nick_norm) as i64;
+                stmt.execute(params![uuid, simhash, "NICKNAME", nick_norm])?;
+            }
+        }
+        tx.commit()?;
+
+        Ok(())
+    }
+
     pub fn upsert(&mut self, item: &IndexedItem, props: &[IndexedProp]) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
+        let fn_norm = search::normalize(&item.display_fn);
+        let fn_simhash = compute_simhash(&fn_norm);
+
         tx.execute(
             r#"
-            INSERT INTO items (uuid, path, fn, fn_norm, rev, has_photo, has_logo, sha1, mtime, lang_pref)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            INSERT INTO items (uuid, path, fn, fn_norm, fn_simhash, rev, has_photo, has_logo, sha1, mtime, lang_pref)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ON CONFLICT(uuid) DO UPDATE SET
               path=excluded.path,
               fn=excluded.fn,
               fn_norm=excluded.fn_norm,
+              fn_simhash=excluded.fn_simhash,
               rev=excluded.rev,
               has_photo=excluded.has_photo,
               has_logo=excluded.has_logo,
@@ -270,7 +358,8 @@ impl Database {
                 item.uuid,
                 item.path.to_string_lossy(),
                 item.display_fn,
-                search::normalize(&item.display_fn),
+                fn_norm,
+                fn_simhash as i64,
                 item.rev,
                 if item.has_photo { 1 } else { 0 },
                 if item.has_logo { 1 } else { 0 },
@@ -300,6 +389,26 @@ impl Database {
                     params_json,
                     prop.seq,
                 ])?;
+            }
+        }
+
+        // Update simhashes table
+        tx.execute("DELETE FROM simhashes WHERE uuid = ?1", params![item.uuid])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO simhashes (uuid, simhash, source, value_norm) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+
+            // Insert FN simhash
+            stmt.execute(params![item.uuid, fn_simhash as i64, "FN", fn_norm])?;
+
+            // Insert NICKNAME simhashes
+            for prop in props {
+                if prop.field == "NICKNAME" {
+                    let nick_norm = search::normalize(&prop.value);
+                    let nick_simhash = compute_simhash(&nick_norm);
+                    stmt.execute(params![item.uuid, nick_simhash as i64, "NICKNAME", nick_norm])?;
+                }
             }
         }
 
@@ -495,17 +604,24 @@ impl Database {
         Ok(out)
     }
 
-    /// List all contacts with their normalized FN for fuzzy matching
-    pub fn list_all_fn_norm(&self) -> Result<Vec<(PathBuf, String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path, fn, fn_norm FROM items WHERE fn_norm IS NOT NULL")?;
+    /// List all simhashes for fuzzy matching (includes FN and nicknames)
+    /// Returns: (path, display_fn, value_norm, simhash, source)
+    pub fn list_all_simhashes(&self) -> Result<Vec<(PathBuf, String, String, u64, String)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT i.path, i.fn, s.value_norm, s.simhash, s.source
+            FROM simhashes s
+            JOIN items i ON s.uuid = i.uuid
+            "#,
+        )?;
 
         let rows = stmt.query_map([], |row| {
             Ok((
                 PathBuf::from(row.get::<_, String>(0)?),
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as u64,
+                row.get::<_, String>(4)?,
             ))
         })?;
 

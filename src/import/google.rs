@@ -8,8 +8,9 @@ use strsim::jaro_winkler;
 use vcard4::property::TextProperty;
 use vcard4::Vcard;
 
+use super::simhash_index::{NameSource, SimHashIndex};
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{compute_simhash, Database};
 use crate::search;
 use crate::vcard_io;
 use crate::vdir;
@@ -68,12 +69,14 @@ pub fn import_google_contacts(
     let mut merged = Vec::new();
     let mut skipped = 0usize;
 
-    // Load existing contacts for automerge if enabled
-    let existing_contacts = if automerge_threshold.is_some() {
-        db.list_all_fn_norm()?
+    // Build SimHash index for automerge if enabled
+    let simhash_index = if automerge_threshold.is_some() {
+        let existing_simhashes = db.list_all_simhashes()?;
+        Some(SimHashIndex::new(existing_simhashes))
     } else {
-        Vec::new()
+        None
     };
+    let simhash_threshold = config.maildir_import.simhash_threshold;
 
     for (index, card_lines) in cards.iter().enumerate() {
         match convert_google_card(card_lines, config.phone_region.as_deref()) {
@@ -87,6 +90,13 @@ pub fn import_google_contacts(
 
                 let primary_email = card.email.first().map(|e| e.value.clone());
 
+                // Collect nicknames from the incoming card
+                let nicknames: Vec<&str> = card
+                    .nickname
+                    .iter()
+                    .map(|n| n.value.as_str())
+                    .collect();
+
                 // Skip if primary email already exists
                 if let Some(ref email) = primary_email {
                     if db.email_exists(email)? {
@@ -98,22 +108,29 @@ pub fn import_google_contacts(
                 // Try automerge if enabled
                 if let Some(threshold) = automerge_threshold {
                     if !fn_value.is_empty() {
-                        if let Some((path, display_fn, score)) =
-                            find_merge_candidate(&existing_contacts, &fn_value, threshold)
-                        {
-                            // Merge into existing contact
-                            if merge_card_into_existing(
-                                &path,
-                                &card,
-                                config.phone_region.as_deref(),
-                            )? {
-                                merged.push(MergeInfo {
-                                    email: primary_email.unwrap_or_default(),
-                                    name: fn_value,
-                                    merged_into: display_fn,
-                                    score,
-                                });
-                                continue;
+                        if let Some(ref simhash_idx) = simhash_index {
+                            if let Some((path, display_fn, score)) = find_merge_candidate(
+                                simhash_idx,
+                                &fn_value,
+                                &nicknames,
+                                threshold,
+                                simhash_threshold,
+                                &config.maildir_import,
+                            ) {
+                                // Merge into existing contact
+                                if merge_card_into_existing(
+                                    &path,
+                                    &card,
+                                    config.phone_region.as_deref(),
+                                )? {
+                                    merged.push(MergeInfo {
+                                        email: primary_email.unwrap_or_default(),
+                                        name: fn_value,
+                                        merged_into: display_fn,
+                                        score,
+                                    });
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -146,33 +163,109 @@ pub fn import_google_contacts(
     })
 }
 
-/// Find a merge candidate using fuzzy matching on FN
+/// Match result with source information for preferencing
+struct MatchCandidate {
+    path: PathBuf,
+    display_fn: String,
+    score: f64,
+    source: NameSource,
+}
+
+/// Find a merge candidate using SimHash BK-tree for fast lookup, then Jaro-Winkler verification.
+/// Checks both the FN and nicknames against existing FNs and nicknames.
+/// Prefers FN matches over nickname matches.
 fn find_merge_candidate(
-    existing_contacts: &[(PathBuf, String, String)],
-    name: &str,
-    threshold: f64,
+    index: &SimHashIndex,
+    fn_value: &str,
+    nicknames: &[&str],
+    jw_threshold: f64,
+    simhash_threshold: u32,
+    import_config: &crate::config::MaildirImportConfig,
 ) -> Option<(PathBuf, String, f64)> {
-    let name_norm = search::normalize(name);
+    let mut all_candidates: Vec<MatchCandidate> = Vec::new();
 
-    let mut best_match: Option<(PathBuf, String, f64)> = None;
+    // Check FN
+    if import_config.is_valid_fn_for_merge(fn_value) {
+        collect_candidates(
+            index,
+            fn_value,
+            jw_threshold,
+            simhash_threshold,
+            &mut all_candidates,
+        );
+    }
 
-    for (path, display_fn, fn_norm) in existing_contacts {
-        let score = jaro_winkler(&name_norm, fn_norm);
-
-        if score >= threshold {
-            match &best_match {
-                Some((_, _, best_score)) if score > *best_score => {
-                    best_match = Some((path.clone(), display_fn.clone(), score));
-                }
-                None => {
-                    best_match = Some((path.clone(), display_fn.clone(), score));
-                }
-                _ => {}
-            }
+    // Check nicknames
+    for nickname in nicknames {
+        if import_config.is_valid_nickname_for_merge(nickname) {
+            collect_candidates(
+                index,
+                nickname,
+                jw_threshold,
+                simhash_threshold,
+                &mut all_candidates,
+            );
         }
     }
 
-    best_match
+    if all_candidates.is_empty() {
+        return None;
+    }
+
+    // Sort candidates: FN matches first, then by score descending
+    all_candidates.sort_by(|a, b| {
+        match (&a.source, &b.source) {
+            (NameSource::FN, NameSource::Nickname) => std::cmp::Ordering::Less,
+            (NameSource::Nickname, NameSource::FN) => std::cmp::Ordering::Greater,
+            _ => b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    });
+
+    all_candidates
+        .into_iter()
+        .next()
+        .map(|c| (c.path, c.display_fn, c.score))
+}
+
+/// Collect matching candidates for a single name
+fn collect_candidates(
+    index: &SimHashIndex,
+    name: &str,
+    jw_threshold: f64,
+    simhash_threshold: u32,
+    results: &mut Vec<MatchCandidate>,
+) {
+    let name_norm = search::normalize(name);
+    let name_simhash = compute_simhash(&name_norm);
+
+    let candidates = index.find_candidates(name_simhash, simhash_threshold);
+
+    for entry in candidates {
+        let score = jaro_winkler(&name_norm, &entry.matched_norm);
+
+        if score >= jw_threshold {
+            let dominated = results.iter().any(|r| {
+                r.path == entry.path
+                    && (r.source == NameSource::FN || entry.source == NameSource::Nickname)
+                    && r.score >= score
+            });
+
+            if !dominated {
+                results.retain(|r| {
+                    r.path != entry.path
+                        || (r.source == NameSource::FN && entry.source == NameSource::Nickname)
+                        || r.score > score
+                });
+
+                results.push(MatchCandidate {
+                    path: entry.path.clone(),
+                    display_fn: entry.display_fn.clone(),
+                    score,
+                    source: entry.source,
+                });
+            }
+        }
+    }
 }
 
 /// Merge a card's data into an existing vCard

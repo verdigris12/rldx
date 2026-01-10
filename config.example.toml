@@ -124,3 +124,68 @@ height = 12
 #   copy = ["xclip", "-selection", "clipboard"]  # X11
 #   copy = ["pbcopy"]                            # macOS
 copy = ["wl-copy"]
+
+# =============================================================================
+# Maildir Import Filters
+# =============================================================================
+# Filters for the `rldx import --format maildir` command.
+# These patterns are used to skip automated/noreply addresses.
+
+[maildir_import]
+# Local part patterns to skip (case-insensitive, substring match).
+# Emails where the local part (before @) contains any of these are skipped.
+skip_local_patterns = [
+    "noreply",
+    "no-reply",
+    "no_reply",
+    "donotreply",
+    "do-not-reply",
+    "do_not_reply",
+    "notifications",
+    "notification",
+    "mailer-daemon",
+    "postmaster",
+    "bounce",
+    "auto-reply",
+    "autoreply",
+]
+
+# Domain patterns to skip (case-insensitive).
+# Supports wildcards: "*.example.com" matches both "example.com" and "sub.example.com".
+skip_domains = [
+    "facebookmail.com",
+    "*.facebookmail.com",
+    "linkedin.com",
+    "*.linkedin.com",
+    "amazonses.com",
+    "*.amazonses.com",
+    "sendgrid.net",
+    "*.sendgrid.net",
+    "mailchimp.com",
+    "*.mailchimp.com",
+    "mailgun.org",
+    "*.mailgun.org",
+]
+
+# SimHash Hamming distance threshold for automerge candidate filtering.
+# Lower = stricter (fewer candidates), higher = more lenient.
+# Candidates within this Hamming distance are verified with Jaro-Winkler.
+# Default: 4 (good for ~0.98 Jaro-Winkler threshold)
+simhash_threshold = 4
+
+# Minimum name length for automerge consideration.
+# Names shorter than this are not considered for matching.
+# Default: 8
+min_name_length = 8
+
+# Minimum number of spaces required in FN for automerge.
+# This ensures FN matches have at least first + last name.
+# Nicknames are not subject to this requirement.
+# Default: 1
+min_fn_spaces = 1
+
+# Shannon entropy threshold for email local part filtering.
+# Emails with entropy above this are considered random/UUID-like and skipped.
+# Entropy measures randomness: "john.doe" ~2.5, "a8f3d2e1-4b5c" ~3.8
+# Default: 3.5
+email_entropy_threshold = 3.5

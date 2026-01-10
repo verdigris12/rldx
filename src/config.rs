@@ -20,6 +20,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub commands: Commands,
     pub top_bar: TopBarConfig,
+    pub maildir_import: MaildirImportConfig,
 }
 
 // =============================================================================
@@ -93,6 +94,147 @@ impl Default for TopBarConfig {
                 TopBarButton { key: "F7".into(), action: TopBarAction::Share },
             ],
         }
+    }
+}
+
+// =============================================================================
+// Maildir Import Configuration
+// =============================================================================
+
+/// Configuration for maildir import email filtering
+#[derive(Debug, Clone)]
+pub struct MaildirImportConfig {
+    /// Local part patterns to skip (case-insensitive, substring match)
+    pub skip_local_patterns: Vec<String>,
+    /// Domain patterns to skip (case-insensitive, supports wildcards: *.example.com)
+    pub skip_domains: Vec<String>,
+    /// SimHash Hamming distance threshold for automerge (default: 4)
+    /// Lower values are stricter (fewer matches), higher values are more lenient
+    pub simhash_threshold: u32,
+    /// Minimum name length for automerge consideration (default: 8)
+    pub min_name_length: usize,
+    /// Minimum spaces required in FN for automerge (default: 1)
+    pub min_fn_spaces: usize,
+    /// Shannon entropy threshold for email local part (default: 3.5)
+    /// Emails with entropy above this are considered random/UUID-like and skipped
+    pub email_entropy_threshold: f64,
+}
+
+impl Default for MaildirImportConfig {
+    fn default() -> Self {
+        Self {
+            skip_local_patterns: vec![
+                "noreply".into(),
+                "no-reply".into(),
+                "no_reply".into(),
+                "donotreply".into(),
+                "do-not-reply".into(),
+                "do_not_reply".into(),
+                "notifications".into(),
+                "notification".into(),
+                "mailer-daemon".into(),
+                "postmaster".into(),
+                "bounce".into(),
+                "auto-reply".into(),
+                "autoreply".into(),
+            ],
+            skip_domains: vec![
+                "facebookmail.com".into(),
+                "*.facebookmail.com".into(),
+                "linkedin.com".into(),
+                "*.linkedin.com".into(),
+                "amazonses.com".into(),
+                "*.amazonses.com".into(),
+                "sendgrid.net".into(),
+                "*.sendgrid.net".into(),
+                "mailchimp.com".into(),
+                "*.mailchimp.com".into(),
+                "mailgun.org".into(),
+                "*.mailgun.org".into(),
+            ],
+            simhash_threshold: 4,
+            min_name_length: 8,
+            min_fn_spaces: 1,
+            email_entropy_threshold: 3.5,
+        }
+    }
+}
+
+impl MaildirImportConfig {
+    /// Check if an email should be skipped based on filters
+    pub fn should_skip_email(&self, email: &str) -> bool {
+        let email_lower = email.to_lowercase();
+        let parts: Vec<&str> = email_lower.split('@').collect();
+        if parts.len() != 2 {
+            return false;
+        }
+        let local_part = parts[0];
+        let domain = parts[1];
+
+        // Check local part patterns
+        for pattern in &self.skip_local_patterns {
+            if local_part.contains(&pattern.to_lowercase()) {
+                return true;
+            }
+        }
+
+        // Check domain patterns (supports wildcards)
+        for pattern in &self.skip_domains {
+            if domain_matches(&pattern.to_lowercase(), domain) {
+                return true;
+            }
+        }
+
+        // Check entropy (skip UUID-like/random emails)
+        if shannon_entropy(local_part) > self.email_entropy_threshold {
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if a name meets minimum requirements for FN matching
+    pub fn is_valid_fn_for_merge(&self, name: &str) -> bool {
+        name.len() >= self.min_name_length && name.chars().filter(|c| *c == ' ').count() >= self.min_fn_spaces
+    }
+
+    /// Check if a name meets minimum requirements for nickname matching
+    pub fn is_valid_nickname_for_merge(&self, name: &str) -> bool {
+        name.len() >= self.min_name_length
+    }
+}
+
+/// Calculate Shannon entropy of a string (bits per character)
+fn shannon_entropy(s: &str) -> f64 {
+    if s.is_empty() {
+        return 0.0;
+    }
+
+    let mut freq: HashMap<char, usize> = HashMap::new();
+    for c in s.chars() {
+        *freq.entry(c).or_insert(0) += 1;
+    }
+
+    let len = s.len() as f64;
+    let mut entropy = 0.0;
+
+    for count in freq.values() {
+        let p = *count as f64 / len;
+        entropy -= p * p.log2();
+    }
+
+    entropy
+}
+
+/// Check if a domain matches a pattern (supports *.example.com wildcards)
+fn domain_matches(pattern: &str, domain: &str) -> bool {
+    if pattern.starts_with("*.") {
+        // Wildcard pattern: *.example.com matches sub.example.com and example.com
+        let suffix = &pattern[1..]; // ".example.com"
+        domain.ends_with(suffix) || domain == &pattern[2..]
+    } else {
+        // Exact match
+        domain == pattern
     }
 }
 
@@ -758,6 +900,8 @@ struct ConfigFile {
     commands: CommandsFile,
     #[serde(default)]
     top_bar: TopBarFile,
+    #[serde(default)]
+    maildir_import: MaildirImportFile,
 }
 
 impl Default for ConfigFile {
@@ -770,6 +914,7 @@ impl Default for ConfigFile {
             ui: UiFile::default(),
             commands: CommandsFile::default(),
             top_bar: TopBarFile::default(),
+            maildir_import: MaildirImportFile::default(),
         }
     }
 }
@@ -831,6 +976,48 @@ impl From<TopBarFile> for TopBarConfig {
             TopBarConfig::default()
         } else {
             TopBarConfig { buttons }
+        }
+    }
+}
+
+// =============================================================================
+// Maildir Import File Deserialization
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct MaildirImportFile {
+    skip_local_patterns: Vec<String>,
+    skip_domains: Vec<String>,
+    simhash_threshold: u32,
+    min_name_length: usize,
+    min_fn_spaces: usize,
+    email_entropy_threshold: f64,
+}
+
+impl Default for MaildirImportFile {
+    fn default() -> Self {
+        let defaults = MaildirImportConfig::default();
+        Self {
+            skip_local_patterns: defaults.skip_local_patterns,
+            skip_domains: defaults.skip_domains,
+            simhash_threshold: defaults.simhash_threshold,
+            min_name_length: defaults.min_name_length,
+            min_fn_spaces: defaults.min_fn_spaces,
+            email_entropy_threshold: defaults.email_entropy_threshold,
+        }
+    }
+}
+
+impl From<MaildirImportFile> for MaildirImportConfig {
+    fn from(file: MaildirImportFile) -> Self {
+        Self {
+            skip_local_patterns: file.skip_local_patterns,
+            skip_domains: file.skip_domains,
+            simhash_threshold: file.simhash_threshold,
+            min_name_length: file.min_name_length,
+            min_fn_spaces: file.min_fn_spaces,
+            email_entropy_threshold: file.email_entropy_threshold,
         }
     }
 }
@@ -916,6 +1103,7 @@ pub fn load() -> Result<Config> {
         ui: cfg_file.ui.into(),
         commands: cfg_file.commands.into(),
         top_bar: cfg_file.top_bar.into(),
+        maildir_import: cfg_file.maildir_import.into(),
     })
 }
 
@@ -936,6 +1124,7 @@ fn warn_unknown_keys(value: &toml::Value) {
         "ui".to_string(),
         "commands".to_string(),
         "top_bar".to_string(),
+        "maildir_import".to_string(),
     ]);
 
     for key in table.keys() {
@@ -954,6 +1143,10 @@ fn warn_unknown_keys(value: &toml::Value) {
 
     if let Some(commands_val) = table.get("commands") {
         warn_unknown_commands_keys(commands_val);
+    }
+
+    if let Some(maildir_import_val) = table.get("maildir_import") {
+        warn_unknown_maildir_import_keys(maildir_import_val);
     }
 }
 
@@ -1141,6 +1334,25 @@ fn warn_unknown_commands_keys(value: &toml::Value) {
     for key in table.keys() {
         if !known.contains(key) {
             eprintln!("warning: unknown commands entry `{}`", key);
+        }
+    }
+}
+
+fn warn_unknown_maildir_import_keys(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from([
+        "skip_local_patterns".to_string(),
+        "skip_domains".to_string(),
+        "simhash_threshold".to_string(),
+        "min_name_length".to_string(),
+        "min_fn_spaces".to_string(),
+        "email_entropy_threshold".to_string(),
+    ]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown maildir_import entry `{}`", key);
         }
     }
 }
@@ -1358,5 +1570,126 @@ impl<'de> serde::Deserialize<'de> for RgbColor {
             Helper::Map { r, g, b } => (r, g, b),
         };
         Ok(RgbColor { r, g, b })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_maildir_import_skip_local_patterns() {
+        let config = MaildirImportConfig::default();
+
+        // Should skip noreply variants
+        assert!(config.should_skip_email("noreply@example.com"));
+        assert!(config.should_skip_email("no-reply@example.com"));
+        assert!(config.should_skip_email("do_not_reply@example.com"));
+        assert!(config.should_skip_email("NOREPLY@EXAMPLE.COM"));
+
+        // Should skip other patterns
+        assert!(config.should_skip_email("notifications@github.com"));
+        assert!(config.should_skip_email("mailer-daemon@example.com"));
+        assert!(config.should_skip_email("bounce-123@example.com"));
+
+        // Should not skip regular emails
+        assert!(!config.should_skip_email("john@example.com"));
+        assert!(!config.should_skip_email("reply@example.com"));
+        assert!(!config.should_skip_email("support@example.com"));
+    }
+
+    #[test]
+    fn test_maildir_import_skip_domains() {
+        let config = MaildirImportConfig::default();
+
+        // Should skip exact domain matches
+        assert!(config.should_skip_email("user@facebookmail.com"));
+        assert!(config.should_skip_email("user@linkedin.com"));
+        assert!(config.should_skip_email("user@sendgrid.net"));
+
+        // Should skip wildcard subdomain matches
+        assert!(config.should_skip_email("user@bounce.facebookmail.com"));
+        assert!(config.should_skip_email("user@mail.linkedin.com"));
+        assert!(config.should_skip_email("user@em123.sendgrid.net"));
+
+        // Should not skip regular domains
+        assert!(!config.should_skip_email("user@gmail.com"));
+        assert!(!config.should_skip_email("user@example.com"));
+        assert!(!config.should_skip_email("user@company.org"));
+    }
+
+    #[test]
+    fn test_domain_matches() {
+        // Exact match
+        assert!(domain_matches("example.com", "example.com"));
+        assert!(!domain_matches("example.com", "sub.example.com"));
+        assert!(!domain_matches("example.com", "notexample.com"));
+
+        // Wildcard match
+        assert!(domain_matches("*.example.com", "example.com"));
+        assert!(domain_matches("*.example.com", "sub.example.com"));
+        assert!(domain_matches("*.example.com", "deep.sub.example.com"));
+        assert!(!domain_matches("*.example.com", "notexample.com"));
+    }
+
+    #[test]
+    fn test_shannon_entropy() {
+        // Uniform strings have zero or low entropy
+        assert!(shannon_entropy("aaaa") < 0.1);
+        assert!(shannon_entropy("aabb") < 1.5);
+
+        // Regular names have moderate entropy
+        let john_entropy = shannon_entropy("john");
+        let johndoe_entropy = shannon_entropy("john.doe");
+        assert!(john_entropy > 1.0 && john_entropy < 2.5);
+        assert!(johndoe_entropy > 2.0 && johndoe_entropy < 3.5);
+
+        // UUID-like strings with many unique characters have higher entropy
+        // a8f3d2e14b5c6d7e8f9a0b1c has high character diversity
+        let uuid_entropy = shannon_entropy("a8f3d2e14b5c6d7e8f9a0b1c");
+        assert!(uuid_entropy > 3.5, "UUID entropy should be > 3.5, got {}", uuid_entropy);
+
+        // Empty string
+        assert_eq!(shannon_entropy(""), 0.0);
+    }
+
+    #[test]
+    fn test_email_entropy_filtering() {
+        let config = MaildirImportConfig::default();
+
+        // Regular emails should not be skipped
+        assert!(!config.should_skip_email("john.doe@example.com"));
+        assert!(!config.should_skip_email("support@company.com"));
+        assert!(!config.should_skip_email("info@domain.org"));
+
+        // UUID-like emails should be skipped (high entropy, 24+ unique chars)
+        assert!(config.should_skip_email("a8f3d2e14b5c6d7e8f9a0b1c@example.com"));
+    }
+
+    #[test]
+    fn test_fn_validation_for_merge() {
+        let config = MaildirImportConfig::default();
+
+        // Valid FNs (8+ chars, 1+ space)
+        assert!(config.is_valid_fn_for_merge("John Smith"));
+        assert!(config.is_valid_fn_for_merge("Mary Jane Watson"));
+
+        // Invalid FNs
+        assert!(!config.is_valid_fn_for_merge("John")); // no space
+        assert!(!config.is_valid_fn_for_merge("Jo Sm")); // too short
+        assert!(!config.is_valid_fn_for_merge("JohnSmith")); // no space
+    }
+
+    #[test]
+    fn test_nickname_validation_for_merge() {
+        let config = MaildirImportConfig::default();
+
+        // Valid nicknames (8+ chars, space not required)
+        assert!(config.is_valid_nickname_for_merge("JohnSmith"));
+        assert!(config.is_valid_nickname_for_merge("Johnny Boy"));
+
+        // Invalid nicknames
+        assert!(!config.is_valid_nickname_for_merge("John")); // too short
+        assert!(!config.is_valid_nickname_for_merge("Joe")); // too short
     }
 }

@@ -12,8 +12,9 @@ use strsim::jaro_winkler;
 use vcard4::property::TextProperty;
 use vcard4::Vcard;
 
+use super::simhash_index::{NameSource, SimHashIndex};
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{compute_simhash, Database};
 use crate::search;
 use crate::vcard_io;
 use crate::vdir;
@@ -235,7 +236,7 @@ fn extract_addresses_to_vec(
     for addr in addrs.iter() {
         match addr {
             MailAddr::Single(info) => {
-                let name = info.display_name.as_deref().unwrap_or("").trim().to_string();
+                let name = clean_name(info.display_name.as_deref().unwrap_or(""));
                 let email = info.addr.trim().to_lowercase();
                 if is_valid_contact(&email, &name) {
                     results.push((email, name, is_from));
@@ -243,12 +244,7 @@ fn extract_addresses_to_vec(
             }
             MailAddr::Group(group) => {
                 for member in &group.addrs {
-                    let name = member
-                        .display_name
-                        .as_deref()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
+                    let name = clean_name(member.display_name.as_deref().unwrap_or(""));
                     let email = member.addr.trim().to_lowercase();
                     if is_valid_contact(&email, &name) {
                         results.push((email, name, is_from));
@@ -259,13 +255,32 @@ fn extract_addresses_to_vec(
     }
 }
 
-/// Check if a contact is valid for import
+/// Clean up a name by stripping surrounding quotes and extra whitespace
+fn clean_name(name: &str) -> String {
+    let trimmed = name.trim();
+    // Strip surrounding quotes (single or double)
+    let stripped = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    stripped.trim().to_string()
+}
+
+/// Check if a contact is valid for import (basic validation only)
 fn is_valid_contact(email: &str, name: &str) -> bool {
-    !email.is_empty()
-        && !name.is_empty()
-        && name.to_lowercase() != email
-        && !name.contains('@')
-        && name.len() >= 2
+    if email.is_empty() || name.is_empty() {
+        return false;
+    }
+
+    let email_lower = email.to_lowercase();
+
+    // Name must be meaningful
+    name.to_lowercase() != email_lower && !name.contains('@') && name.len() >= 2
 }
 
 /// Merge a contact entry into the map
@@ -326,12 +341,14 @@ fn import_contacts(
     let mut merged = Vec::new();
     let mut skipped = 0usize;
 
-    // Load existing contacts for automerge if enabled
-    let existing_contacts = if automerge_threshold.is_some() {
-        db.list_all_fn_norm()?
+    // Build SimHash index for automerge if enabled
+    let simhash_index = if automerge_threshold.is_some() {
+        let existing_simhashes = db.list_all_simhashes()?;
+        Some(SimHashIndex::new(existing_simhashes))
     } else {
-        Vec::new()
+        None
     };
+    let simhash_threshold = config.maildir_import.simhash_threshold;
 
     // Progress bar for import phase
     let pb = ProgressBar::new(contacts.len() as u64);
@@ -346,6 +363,12 @@ fn import_contacts(
     for contact in contacts.values() {
         pb.inc(1);
 
+        // Skip if email matches configured filter patterns
+        if config.maildir_import.should_skip_email(&contact.email) {
+            skipped += 1;
+            continue;
+        }
+
         // Skip if email already exists in database
         if db.email_exists(&contact.email)? {
             skipped += 1;
@@ -354,23 +377,33 @@ fn import_contacts(
 
         // Try to find merge candidate if automerge is enabled
         if let Some(threshold) = automerge_threshold {
-            if let Some((path, display_fn, score)) =
-                find_merge_candidate(&existing_contacts, &contact.primary_name, threshold)
-            {
-                // Merge into existing contact
-                if merge_into_existing(
-                    &path,
-                    &contact.email,
-                    &contact.aliases,
-                    config.phone_region.as_deref(),
-                )? {
-                    merged.push(MergeInfo {
-                        email: contact.email.clone(),
-                        name: contact.primary_name.clone(),
-                        merged_into: display_fn,
-                        score,
-                    });
-                    continue;
+            if let Some(ref index) = simhash_index {
+                // Collect all names to check: primary name + aliases
+                let aliases_vec: Vec<&str> = contact.aliases.iter().map(|s| s.as_str()).collect();
+
+                if let Some((path, display_fn, score)) = find_merge_candidate(
+                    index,
+                    &contact.primary_name,
+                    &aliases_vec,
+                    threshold,
+                    simhash_threshold,
+                    &config.maildir_import,
+                ) {
+                    // Merge into existing contact
+                    if merge_into_existing(
+                        &path,
+                        &contact.email,
+                        &contact.aliases,
+                        config.phone_region.as_deref(),
+                    )? {
+                        merged.push(MergeInfo {
+                            email: contact.email.clone(),
+                            name: contact.primary_name.clone(),
+                            merged_into: display_fn,
+                            score,
+                        });
+                        continue;
+                    }
                 }
             }
         }
@@ -406,33 +439,114 @@ fn import_contacts(
     })
 }
 
-/// Find a merge candidate using fuzzy matching on FN
+/// Match result with source information for preferencing
+struct MatchCandidate {
+    path: PathBuf,
+    display_fn: String,
+    score: f64,
+    source: NameSource,
+}
+
+/// Find a merge candidate using SimHash BK-tree for fast lookup, then Jaro-Winkler verification.
+/// Checks both the primary name and aliases against existing FNs and nicknames.
+/// Prefers FN matches over nickname matches.
 fn find_merge_candidate(
-    existing_contacts: &[(PathBuf, String, String)],
-    name: &str,
-    threshold: f64,
+    index: &SimHashIndex,
+    primary_name: &str,
+    aliases: &[&str],
+    jw_threshold: f64,
+    simhash_threshold: u32,
+    import_config: &crate::config::MaildirImportConfig,
 ) -> Option<(PathBuf, String, f64)> {
-    let name_norm = search::normalize(name);
+    let mut all_candidates: Vec<MatchCandidate> = Vec::new();
 
-    let mut best_match: Option<(PathBuf, String, f64)> = None;
+    // Check primary name
+    if import_config.is_valid_fn_for_merge(primary_name) {
+        collect_candidates(
+            index,
+            primary_name,
+            jw_threshold,
+            simhash_threshold,
+            &mut all_candidates,
+        );
+    }
 
-    for (path, display_fn, fn_norm) in existing_contacts {
-        let score = jaro_winkler(&name_norm, fn_norm);
-
-        if score >= threshold {
-            match &best_match {
-                Some((_, _, best_score)) if score > *best_score => {
-                    best_match = Some((path.clone(), display_fn.clone(), score));
-                }
-                None => {
-                    best_match = Some((path.clone(), display_fn.clone(), score));
-                }
-                _ => {}
-            }
+    // Check aliases
+    for alias in aliases {
+        if import_config.is_valid_nickname_for_merge(alias) {
+            collect_candidates(
+                index,
+                alias,
+                jw_threshold,
+                simhash_threshold,
+                &mut all_candidates,
+            );
         }
     }
 
-    best_match
+    if all_candidates.is_empty() {
+        return None;
+    }
+
+    // Sort candidates: FN matches first, then by score descending
+    all_candidates.sort_by(|a, b| {
+        // FN matches are preferred over nickname matches
+        match (&a.source, &b.source) {
+            (NameSource::FN, NameSource::Nickname) => std::cmp::Ordering::Less,
+            (NameSource::Nickname, NameSource::FN) => std::cmp::Ordering::Greater,
+            _ => b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    });
+
+    // Return the best match
+    all_candidates
+        .into_iter()
+        .next()
+        .map(|c| (c.path, c.display_fn, c.score))
+}
+
+/// Collect matching candidates for a single name
+fn collect_candidates(
+    index: &SimHashIndex,
+    name: &str,
+    jw_threshold: f64,
+    simhash_threshold: u32,
+    results: &mut Vec<MatchCandidate>,
+) {
+    let name_norm = search::normalize(name);
+    let name_simhash = compute_simhash(&name_norm);
+
+    // Find candidates within Hamming distance threshold using BK-tree
+    let candidates = index.find_candidates(name_simhash, simhash_threshold);
+
+    for entry in candidates {
+        let score = jaro_winkler(&name_norm, &entry.matched_norm);
+
+        if score >= jw_threshold {
+            // Avoid duplicate paths with lower scores
+            let dominated = results.iter().any(|r| {
+                r.path == entry.path
+                    && (r.source == NameSource::FN || entry.source == NameSource::Nickname)
+                    && r.score >= score
+            });
+
+            if !dominated {
+                // Remove any dominated entries for this path
+                results.retain(|r| {
+                    r.path != entry.path
+                        || (r.source == NameSource::FN && entry.source == NameSource::Nickname)
+                        || r.score > score
+                });
+
+                results.push(MatchCandidate {
+                    path: entry.path.clone(),
+                    display_fn: entry.display_fn.clone(),
+                    score,
+                    source: entry.source,
+                });
+            }
+        }
+    }
 }
 
 /// Merge email and aliases into an existing vCard
@@ -519,4 +633,41 @@ fn escape_vcard_value(value: &str) -> String {
         .replace(',', "\\,")
         .replace(';', "\\;")
         .replace('\n', "\\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_name_strips_double_quotes() {
+        assert_eq!(clean_name("\"John Smith\""), "John Smith");
+        assert_eq!(clean_name("  \"John Smith\"  "), "John Smith");
+    }
+
+    #[test]
+    fn test_clean_name_strips_single_quotes() {
+        assert_eq!(clean_name("'John Smith'"), "John Smith");
+        assert_eq!(clean_name("  'John Smith'  "), "John Smith");
+    }
+
+    #[test]
+    fn test_clean_name_no_quotes() {
+        assert_eq!(clean_name("John Smith"), "John Smith");
+        assert_eq!(clean_name("  John Smith  "), "John Smith");
+    }
+
+    #[test]
+    fn test_clean_name_mismatched_quotes() {
+        // Mismatched quotes should not be stripped
+        assert_eq!(clean_name("\"John Smith'"), "\"John Smith'");
+        assert_eq!(clean_name("'John Smith\""), "'John Smith\"");
+    }
+
+    #[test]
+    fn test_clean_name_partial_quotes() {
+        // Only leading or trailing quote should not be stripped
+        assert_eq!(clean_name("\"John Smith"), "\"John Smith");
+        assert_eq!(clean_name("John Smith\""), "John Smith\"");
+    }
 }
