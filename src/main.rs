@@ -895,13 +895,14 @@ db_path = "{db_path}"
 # Top Bar Buttons
 # =============================================================================
 # Map function keys (F1-F12) to actions displayed in the header bar.
-# Supported actions: help, edit, refresh, share
+# Supported actions: help, sync, refresh, share, delete
 
 [top_bar]
 F1 = "help"
-F3 = "edit"
+F2 = "sync"
 F5 = "refresh"
 F7 = "share"
+F8 = "delete"
 
 # Optional: override which fields appear in the first pane.
 # fields_first_pane = ["fname", "mname", "lname", "alias", "phone", "email"]
@@ -941,14 +942,13 @@ merge = ["m"]
 toggle_marked = ["M"]
 
 [keys.navigation]
-next = ["j", "Down", "Tab"]
-prev = ["k", "Up", "Backtab"]
-tab_next = ["l", "Right"]
-tab_prev = ["h", "Left"]
+next = ["Tab", "j", "Down"]
+prev = ["Backspace", "k", "Up"]
 edit = ["e"]
-copy = ["y", "Space"]
+copy = ["Space"]
 confirm = ["Enter"]
-add_alias = ["a"]
+add_field = ["a"]
+delete_field = ["d"]
 photo_fetch = ["i"]
 lang_cycle = ["L"]
 

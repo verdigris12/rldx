@@ -110,6 +110,15 @@ fn rldx_cmd() -> AssertCommand {
     AssertCommand::cargo_bin("rldx").unwrap()
 }
 
+/// Check if gpg is available
+fn gpg_available() -> bool {
+    Command::new("gpg")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Generate a test GPG key and return the key ID
 fn generate_test_gpg_key(gnupg_home: &Path) -> String {
     fs::create_dir_all(gnupg_home).unwrap();
@@ -241,6 +250,11 @@ fn test_init_age_creates_config_and_vdir() {
 
 #[test]
 fn test_init_gpg_creates_config() {
+    if !gpg_available() {
+        eprintln!("Skipping test: gpg not available");
+        return;
+    }
+    
     let temp_dir = TempDir::new().unwrap();
     let gnupg_home = temp_dir.path().join("gnupg");
     let key_id = generate_test_gpg_key(&gnupg_home);
@@ -430,6 +444,11 @@ fn test_import_google_contacts() {
 
 #[test]
 fn test_import_google_contacts_with_gpg() {
+    if !gpg_available() {
+        eprintln!("Skipping test: gpg not available");
+        return;
+    }
+    
     let env = TestEnv::new_with_gpg();
 
     env.rldx()
