@@ -23,7 +23,11 @@ pub fn marker_path(vdir: &Path) -> PathBuf {
     vdir.join(NORMALIZED_MARKER)
 }
 
-pub fn normalize(vdir: &Path, default_region: Option<&str>) -> Result<NormalizationReport> {
+pub fn normalize(
+    vdir: &Path,
+    default_region: Option<&str>,
+    provider: &dyn CryptoProvider,
+) -> Result<NormalizationReport> {
     let mut report = NormalizationReport::default();
 
     if !vdir.exists() {
@@ -42,8 +46,15 @@ pub fn normalize(vdir: &Path, default_region: Option<&str>) -> Result<Normalizat
     entries.sort();
 
     for path in entries {
-        let content = fs::read_to_string(&path)
+        // Read and decrypt file
+        let encrypted = fs::read(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+        let decrypted = provider
+            .decrypt(&encrypted)
+            .with_context(|| format!("failed to decrypt {}", path.display()))?;
+        let content = String::from_utf8(decrypted)
+            .with_context(|| format!("vCard file {} contains invalid UTF-8", path.display()))?;
+
         match vcard_io::parse_str_with_source(&content, default_region) {
             Ok(cards) => {
                 process_cards(
@@ -53,6 +64,7 @@ pub fn normalize(vdir: &Path, default_region: Option<&str>) -> Result<Normalizat
                     &mut used_names,
                     &mut report,
                     &mut files_to_remove,
+                    provider,
                 )?;
             }
             Err(err) => {
@@ -96,15 +108,13 @@ fn process_cards(
     used_names: &mut HashSet<String>,
     report: &mut NormalizationReport,
     files_to_remove: &mut Vec<PathBuf>,
+    provider: &dyn CryptoProvider,
 ) -> Result<()> {
     let multi = cards.len() > 1;
     let mut can_remove_original = true;
     let mut wrote_any = false;
     let mut wrote_to_different_path = false;
-    let original_stem = original_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string());
+    let original_stem = vcf_base_stem(original_path);
 
     for card_src in cards {
         if !card_src.is_v4 {
@@ -123,10 +133,13 @@ fn process_cards(
         vcard_io::transliterate_card(&mut card);
 
         let short_name = select_filename(&uuid, used_names, original_stem.as_deref());
-        let target = vdir.join(format!("{short_name}.vcf"));
+        let target = vcf_target_path(vdir, &short_name, provider.encryption_type());
 
         let bytes = vcard_io::card_to_bytes(&card);
-        write_atomic(&target, &bytes)?;
+        let encrypted = provider
+            .encrypt(&bytes)
+            .with_context(|| format!("failed to encrypt vCard for {}", target.display()))?;
+        write_atomic(&target, &encrypted)?;
         wrote_any = true;
 
         if target != *original_path {
@@ -194,7 +207,6 @@ pub(crate) fn existing_stems(vdir: &Path) -> Result<HashSet<String>> {
     Ok(stems)
 }
 
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub(crate) fn existing_stems_with_encryption(vdir: &Path, encryption_type: EncryptionType) -> Result<HashSet<String>> {
     let mut stems = HashSet::new();
     let mut files = list_vcf_files_with_encryption(vdir, encryption_type)?;
@@ -234,7 +246,6 @@ fn collect_all_vcf(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 /// List vCard files for a specific encryption type
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn list_vcf_files_with_encryption(root: &Path, encryption_type: EncryptionType) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     collect_vcf(root, &mut files, encryption_type)?;
@@ -242,7 +253,6 @@ pub fn list_vcf_files_with_encryption(root: &Path, encryption_type: EncryptionTy
 }
 
 /// Check if a file matches the expected vCard extension for the given encryption type
-#[allow(dead_code)] // Used once full encryption integration is complete
 fn is_vcf_file(path: &Path, encryption_type: EncryptionType) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let name_lower = name.to_ascii_lowercase();
@@ -271,7 +281,6 @@ pub fn vcf_base_stem(path: &Path) -> Option<String> {
     None
 }
 
-#[allow(dead_code)] // Used once full encryption integration is complete
 fn collect_vcf(dir: &Path, files: &mut Vec<PathBuf>, encryption_type: EncryptionType) -> Result<()> {
     for entry in
         fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?
@@ -381,7 +390,6 @@ pub fn write_atomic(target: &Path, data: &[u8]) -> Result<()> {
 // =============================================================================
 
 /// Read a vCard file, decrypting if necessary
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn read_vcf_file(path: &Path, provider: &dyn CryptoProvider) -> Result<String> {
     let data = fs::read(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -395,7 +403,6 @@ pub fn read_vcf_file(path: &Path, provider: &dyn CryptoProvider) -> Result<Strin
 }
 
 /// Write a vCard file, encrypting if necessary
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn write_vcf_file(path: &Path, data: &[u8], provider: &dyn CryptoProvider) -> Result<()> {
     let encrypted = provider.encrypt(data)
         .with_context(|| format!("failed to encrypt data for {}", path.display()))?;
@@ -404,7 +411,6 @@ pub fn write_vcf_file(path: &Path, data: &[u8], provider: &dyn CryptoProvider) -
 }
 
 /// Get the target path for a vCard file with the correct extension
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn vcf_target_path(vdir: &Path, stem: &str, encryption_type: EncryptionType) -> PathBuf {
     let extension = match encryption_type {
         EncryptionType::Gpg => "vcf.gpg",

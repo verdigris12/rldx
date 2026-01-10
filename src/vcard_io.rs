@@ -8,6 +8,7 @@ use vcard4::parameter::Parameters;
 use vcard4::property::{DateTimeProperty, TextListProperty, TextOrUriProperty, TextProperty};
 use vcard4::{parse, DateTime, Uri, Vcard};
 
+use crate::crypto::CryptoProvider;
 use crate::translit;
 
 /// Representation of a parsed vCard alongside metadata derived from the
@@ -25,12 +26,24 @@ pub struct ParsedCards {
 }
 
 /// Parse a UTF-8 encoded vCard file into `Vcard` values.
-pub fn parse_file(path: &Path, default_region: Option<&str>) -> Result<ParsedCards> {
-    let input = fs::read_to_string(path)
+/// Decrypts the file using the provided crypto provider.
+pub fn parse_file(
+    path: &Path,
+    default_region: Option<&str>,
+    provider: &dyn CryptoProvider,
+) -> Result<ParsedCards> {
+    // Read and decrypt file
+    let encrypted = fs::read(path)
         .with_context(|| format!("failed to read vCard file at {}", path.display()))?;
+    let decrypted = provider
+        .decrypt(&encrypted)
+        .with_context(|| format!("failed to decrypt vCard file at {}", path.display()))?;
+    let input = String::from_utf8(decrypted)
+        .with_context(|| format!("vCard file {} contains invalid UTF-8", path.display()))?;
+
     let parsed = parse_str(&input, default_region)?;
     if parsed.changed {
-        write_cards(path, &parsed.cards)?;
+        write_cards(path, &parsed.cards, provider)?;
     }
     Ok(parsed)
 }
@@ -254,7 +267,8 @@ pub fn phone_display_value(raw: &str, default_region: Option<&str>) -> String {
         .unwrap_or_else(|| remainder.to_string())
 }
 
-pub fn write_cards(path: &Path, cards: &[Vcard]) -> Result<()> {
+/// Write cards to an encrypted file using the given provider
+pub fn write_cards(path: &Path, cards: &[Vcard], provider: &dyn CryptoProvider) -> Result<()> {
     let mut output = String::new();
     for (idx, card) in cards.iter().enumerate() {
         if idx > 0 {
@@ -266,9 +280,10 @@ pub fn write_cards(path: &Path, cards: &[Vcard]) -> Result<()> {
         }
         output.push_str(&card_text);
     }
-    fs::write(path, output.as_bytes())
-        .with_context(|| format!("failed to write normalized vCard to {}", path.display()))?;
-    Ok(())
+    let encrypted = provider
+        .encrypt(output.as_bytes())
+        .with_context(|| format!("failed to encrypt vCard for {}", path.display()))?;
+    crate::vdir::write_atomic(path, &encrypted)
 }
 
 /// Ensure the provided card has a UUID-based UID property.

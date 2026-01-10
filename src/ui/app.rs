@@ -23,6 +23,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 
 use crate::config::{CommandExec, Config, TopBarAction, UiColors};
+use crate::crypto::CryptoProvider;
 use crate::db::{ContactItem, ContactListEntry, Database, PropRow};
 use crate::indexer;
 use crate::search;
@@ -332,6 +333,7 @@ impl MultiValueModal {
 pub struct App<'a> {
     db: &'a mut Database,
     config: &'a Config,
+    provider: &'a dyn CryptoProvider,
     pub contacts: Vec<ContactListEntry>,
     pub selected: usize,
     pub search_input: Input,
@@ -377,11 +379,12 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    pub fn new(db: &'a mut Database, config: &'a Config) -> Result<Self> {
+    pub fn new(db: &'a mut Database, config: &'a Config, provider: &'a dyn CryptoProvider) -> Result<Self> {
         let contacts = db.list_contacts(None)?;
         let mut app = Self {
             db,
             config,
+            provider,
             contacts,
             selected: 0,
             search_input: Input::default(),
@@ -861,7 +864,7 @@ impl<'a> App<'a> {
         let default_region = self.config.phone_region.as_deref();
         let mut cards: Vec<Vcard> = Vec::new();
         for path in &paths {
-            let parsed = vcard_io::parse_file(path, default_region)?;
+            let parsed = vcard_io::parse_file(path, default_region, self.provider)?;
             if let Some(card) = parsed.cards.into_iter().next() {
                 cards.push(card);
             }
@@ -1675,7 +1678,7 @@ impl<'a> App<'a> {
         let trimmed = alias.trim();
         if trimmed.is_empty() { return Ok(()); }
 
-        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
         let mut cards = parsed.cards;
         if cards.is_empty() { return Ok(()); }
 
@@ -1694,7 +1697,7 @@ impl<'a> App<'a> {
             }
         }
 
-        vcard_io::write_cards(&contact.path, &cards)?;
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
 
         let card_clone = cards[0].clone();
         let state = vdir::compute_file_state(&contact.path)?;
@@ -1731,7 +1734,7 @@ impl<'a> App<'a> {
             return Ok(false);
         };
 
-        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
         let mut cards = parsed.cards;
         if cards.is_empty() {
             self.set_status("Contact has no cards");
@@ -1748,7 +1751,7 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        vcard_io::write_cards(&contact.path, &cards)?;
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
 
         let card_clone = cards[0].clone();
         let state = vdir::compute_file_state(&contact.path)?;
@@ -1772,7 +1775,7 @@ impl<'a> App<'a> {
             return Ok(());
         };
 
-        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
         let mut cards = parsed.cards;
         if cards.is_empty() {
             self.set_status("Contact has no cards");
@@ -1796,7 +1799,7 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        vcard_io::write_cards(&contact.path, &cards)?;
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
 
         let card_clone = cards[0].clone();
         let state = vdir::compute_file_state(&contact.path)?;
@@ -1832,7 +1835,7 @@ impl<'a> App<'a> {
             return Ok(false);
         };
 
-        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
         let mut cards = parsed.cards;
         if cards.is_empty() {
             self.set_status("Contact has no cards");
@@ -1856,7 +1859,7 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        vcard_io::write_cards(&contact.path, &cards)?;
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
 
         let card_clone = cards[0].clone();
         let state = vdir::compute_file_state(&contact.path)?;
@@ -2268,7 +2271,7 @@ impl<'a> App<'a> {
 
         for path in files {
             let state = vdir::compute_file_state(&path)?;
-            let parsed = vcard_io::parse_file(&path, self.config.phone_region.as_deref())?;
+            let parsed = vcard_io::parse_file(&path, self.config.phone_region.as_deref(), self.provider)?;
             let cards = parsed.cards;
 
             if cards.is_empty() {
@@ -2303,7 +2306,7 @@ impl<'a> App<'a> {
         };
 
         // Parse the vCard file to get full card data
-        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
         let Some(mut card) = parsed.cards.into_iter().next() else {
             self.set_status("Unable to load contact");
             return Ok(());

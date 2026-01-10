@@ -81,7 +81,7 @@ confirm = ["Enter", "y"]         # Confirm action
 next = ["j", "Down", "Tab"]      # Next item
 prev = ["k", "Up", "Backtab"]    # Previous item
 edit = ["e"]                     # Edit selected item
-copy = ["y", "Space"]            # Copy and close
+copy = ["Space"]                 # Copy and close
 set_default = ["d"]              # Set as default value
 
 [keys.editor]
@@ -123,7 +123,7 @@ height = 12
 #   copy = ["wl-copy"]                           # Wayland
 #   copy = ["xclip", "-selection", "clipboard"]  # X11
 #   copy = ["pbcopy"]                            # macOS
-copy = ["wl-copy"]
+copy = ["xclip", "-selection", "clipboard"]
 
 # =============================================================================
 # Maildir Import Filters

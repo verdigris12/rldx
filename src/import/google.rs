@@ -10,6 +10,7 @@ use vcard4::Vcard;
 
 use super::simhash_index::{NameSource, SimHashIndex};
 use crate::config::Config;
+use crate::crypto::CryptoProvider;
 use crate::db::{compute_simhash, Database};
 use crate::search;
 use crate::vcard_io;
@@ -39,6 +40,7 @@ pub fn import_google_contacts(
     book: Option<&str>,
     automerge_threshold: Option<f64>,
     db: &mut Database,
+    provider: &dyn CryptoProvider,
 ) -> Result<ImportResult> {
     let content = fs::read_to_string(input).with_context(|| {
         format!(
@@ -122,6 +124,7 @@ pub fn import_google_contacts(
                                     &path,
                                     &card,
                                     config.phone_region.as_deref(),
+                                    provider,
                                 )? {
                                     merged.push(MergeInfo {
                                         email: primary_email.unwrap_or_default(),
@@ -141,9 +144,11 @@ pub fn import_google_contacts(
                 vcard_io::touch_rev(&mut card);
 
                 let filename = vdir::select_filename(&uuid, &mut used_names, None);
-                let path = target_dir.join(format!("{filename}.vcf"));
+                let path = vdir::vcf_target_path(&target_dir, &filename, provider.encryption_type());
                 let bytes = vcard_io::card_to_bytes(&card);
-                vdir::write_atomic(&path, &bytes)?;
+                let encrypted = provider.encrypt(&bytes)
+                    .with_context(|| format!("failed to encrypt vCard for {}", path.display()))?;
+                vdir::write_atomic(&path, &encrypted)?;
                 imported += 1;
             }
             Err(err) => {
@@ -273,8 +278,9 @@ fn merge_card_into_existing(
     path: &Path,
     source: &Vcard,
     default_region: Option<&str>,
+    provider: &dyn CryptoProvider,
 ) -> Result<bool> {
-    let parsed = vcard_io::parse_file(path, default_region)?;
+    let parsed = vcard_io::parse_file(path, default_region, provider)?;
     let Some(mut card) = parsed.cards.into_iter().next() else {
         return Ok(false);
     };
@@ -352,7 +358,9 @@ fn merge_card_into_existing(
     if changed {
         vcard_io::touch_rev(&mut card);
         let bytes = vcard_io::card_to_bytes(&card);
-        vdir::write_atomic(path, &bytes)?;
+        let encrypted = provider.encrypt(&bytes)
+            .with_context(|| format!("failed to encrypt vCard for {}", path.display()))?;
+        vdir::write_atomic(path, &encrypted)?;
     }
 
     Ok(changed)

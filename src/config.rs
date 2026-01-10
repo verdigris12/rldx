@@ -21,7 +21,6 @@ pub struct Config {
     pub commands: Commands,
     pub top_bar: TopBarConfig,
     pub maildir_import: MaildirImportConfig,
-    #[allow(dead_code)] // Used once full encryption integration is complete
     pub encryption: EncryptionConfig,
 }
 
@@ -40,7 +39,6 @@ pub enum EncryptionType {
 
 impl EncryptionType {
     /// Parse from string (case-insensitive)
-    #[allow(dead_code)] // Used once full encryption integration is complete
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "gpg" => Some(EncryptionType::Gpg),
@@ -50,7 +48,6 @@ impl EncryptionType {
     }
 
     /// File extension for encrypted vCard files
-    #[allow(dead_code)] // Used once full encryption integration is complete
     pub fn vcf_extension(&self) -> &'static str {
         match self {
             EncryptionType::Gpg => "vcf.gpg",

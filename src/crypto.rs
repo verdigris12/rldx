@@ -17,7 +17,6 @@ use crate::config::{EncryptionConfig, EncryptionType};
 // =============================================================================
 
 /// Trait for encryption/decryption providers
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub trait CryptoProvider: Send + Sync {
     /// Encrypt plaintext data, returning ciphertext
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>>;
@@ -41,12 +40,10 @@ pub trait CryptoProvider: Send + Sync {
 // =============================================================================
 
 /// GPG encryption provider using gpg command-line tool
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub struct GpgProvider {
     key_id: String,
 }
 
-#[allow(dead_code)] // Used once full encryption integration is complete
 impl GpgProvider {
     pub fn new(key_id: String) -> Result<Self> {
         // Verify GPG is available and key exists
@@ -191,13 +188,11 @@ impl CryptoProvider for GpgProvider {
 // =============================================================================
 
 /// Age encryption provider using the age library
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub struct AgeProvider {
     identity_path: PathBuf,
     recipient: String,
 }
 
-#[allow(dead_code)] // Used once full encryption integration is complete
 impl AgeProvider {
     pub fn new(identity_path: PathBuf, recipient: String) -> Result<Self> {
         // Validate identity file exists
@@ -357,7 +352,6 @@ impl CryptoProvider for AgeProvider {
 // =============================================================================
 
 /// Create a CryptoProvider from configuration
-#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn create_provider(config: &EncryptionConfig) -> Result<Box<dyn CryptoProvider>> {
     match config.encryption_type {
         EncryptionType::Gpg => {

@@ -118,14 +118,17 @@ fn main() -> Result<()> {
 
     let config = config::load()?;
 
+    // Create the encryption provider
+    let provider = crypto::create_provider(&config.encryption)?;
+
     if let Some(command) = cli.command {
         match command {
             Command::Import(args) => {
-                handle_import(args, &config)?;
+                handle_import(args, &config, provider.as_ref())?;
                 return Ok(());
             }
             Command::Query(args) => {
-                handle_query(args)?;
+                handle_query(args, &config)?;
                 return Ok(());
             }
             Command::Init(_) => {
@@ -137,7 +140,7 @@ fn main() -> Result<()> {
 
     println!("Loaded configuration from {}", config.config_path.display());
 
-    let normalize_report = vdir::normalize(&config.vdir, config.phone_region.as_deref())?;
+    let normalize_report = vdir::normalize(&config.vdir, config.phone_region.as_deref(), provider.as_ref())?;
     if !normalize_report.needs_upgrade.is_empty() {
         eprintln!(
             "warning: {} cards require manual upgrade to vCard 4.0",
@@ -145,17 +148,22 @@ fn main() -> Result<()> {
         );
     }
 
-    let mut db = Database::open()?;
-    reindex(&mut db, &config, cli.reindex)?;
+    // Derive DB key from encryption provider
+    let db_key = provider.derive_db_key()?;
+    let mut db = Database::open_with_key(Some(&db_key))?;
+    reindex(&mut db, &config, cli.reindex, provider.as_ref())?;
 
-    let mut app = ui::app::App::new(&mut db, &config)?;
+    let mut app = ui::app::App::new(&mut db, &config, provider.as_ref())?;
     app.run()?;
 
     Ok(())
 }
 
-fn handle_query(args: QueryArgs) -> Result<()> {
-    let db = Database::open()?;
+fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
+    // Create provider and derive DB key for encrypted database
+    let provider = crypto::create_provider(&config.encryption)?;
+    let db_key = provider.derive_db_key()?;
+    let db = Database::open_with_key(Some(&db_key))?;
     let results = db.query_emails(&args.query)?;
 
     // Header line (abook-compatible, ignored by mutt/aerc)
@@ -182,7 +190,7 @@ fn handle_query(args: QueryArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
+fn handle_import(args: ImportArgs, config: &Config, provider: &dyn crypto::CryptoProvider) -> Result<()> {
     // Validate automerge threshold
     if let Some(threshold) = args.automerge {
         if !(0.0..=1.0).contains(&threshold) {
@@ -190,7 +198,7 @@ fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
         }
     }
 
-    let normalize_report = vdir::normalize(&config.vdir, config.phone_region.as_deref())?;
+    let normalize_report = vdir::normalize(&config.vdir, config.phone_region.as_deref(), provider)?;
     if !normalize_report.needs_upgrade.is_empty() {
         eprintln!(
             "warning: {} cards require manual upgrade to vCard 4.0",
@@ -198,7 +206,9 @@ fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
         );
     }
 
-    let mut db = Database::open()?;
+    // Open encrypted database
+    let db_key = provider.derive_db_key()?;
+    let mut db = Database::open_with_key(Some(&db_key))?;
 
     match args.format {
         ImportFormat::Google => {
@@ -208,6 +218,7 @@ fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
                 args.book.as_deref(),
                 args.automerge,
                 &mut db,
+                provider,
             )?;
 
             println!("Imported {} contacts.", result.imported);
@@ -237,6 +248,7 @@ fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
                 args.automerge,
                 args.threads,
                 &mut db,
+                provider,
             )?;
 
             println!("Imported {} contacts.", result.imported);
@@ -260,11 +272,16 @@ fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
         }
     };
 
-    reindex(&mut db, config, false)?;
+    reindex(&mut db, config, false, provider)?;
     Ok(())
 }
 
-fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
+fn reindex(
+    db: &mut Database,
+    config: &Config,
+    force: bool,
+    provider: &dyn crypto::CryptoProvider,
+) -> Result<()> {
     let files = vdir::list_vcf_files(&config.vdir)?;
     let paths_set: HashSet<_> = files.iter().cloned().collect();
     if force {
@@ -290,8 +307,8 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
             continue;
         }
 
-        // Only parse files that need reindexing
-        let parsed = vcard_io::parse_file(&path, config.phone_region.as_deref())?;
+        // Only parse files that need reindexing (decrypt with provider)
+        let parsed = vcard_io::parse_file(&path, config.phone_region.as_deref(), provider)?;
         let cards = parsed.cards;
 
         if cards.is_empty() {

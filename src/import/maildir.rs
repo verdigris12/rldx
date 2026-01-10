@@ -14,6 +14,7 @@ use vcard4::Vcard;
 
 use super::simhash_index::{NameSource, SimHashIndex};
 use crate::config::Config;
+use crate::crypto::CryptoProvider;
 use crate::db::{compute_simhash, Database};
 use crate::search;
 use crate::vcard_io;
@@ -54,6 +55,7 @@ pub fn import_maildir(
     automerge_threshold: Option<f64>,
     threads: Option<usize>,
     db: &mut Database,
+    provider: &dyn CryptoProvider,
 ) -> Result<ImportResult> {
     // Configure thread pool if specified
     if let Some(num_threads) = threads {
@@ -91,7 +93,7 @@ pub fn import_maildir(
     eprintln!("Extracted {} unique contacts", contacts.len());
 
     // Phase 3: Import contacts (sequential - involves file I/O and DB)
-    import_contacts(contacts, config, book, automerge_threshold, db)
+    import_contacts(contacts, config, book, automerge_threshold, db, provider)
 }
 
 /// Collect all mail file paths from maildir structure
@@ -323,6 +325,7 @@ fn import_contacts(
     book: Option<&str>,
     automerge_threshold: Option<f64>,
     db: &mut Database,
+    provider: &dyn CryptoProvider,
 ) -> Result<ImportResult> {
     let target_dir = match book {
         Some(name) => config.vdir.join(name),
@@ -395,6 +398,7 @@ fn import_contacts(
                         &contact.email,
                         &contact.aliases,
                         config.phone_region.as_deref(),
+                        provider,
                     )? {
                         merged.push(MergeInfo {
                             email: contact.email.clone(),
@@ -415,9 +419,11 @@ fn import_contacts(
                 vcard_io::touch_rev(&mut card);
 
                 let filename = vdir::select_filename(&uuid, &mut used_names, None);
-                let path = target_dir.join(format!("{filename}.vcf"));
+                let path = vdir::vcf_target_path(&target_dir, &filename, provider.encryption_type());
                 let bytes = vcard_io::card_to_bytes(&card);
-                vdir::write_atomic(&path, &bytes)?;
+                let encrypted = provider.encrypt(&bytes)
+                    .with_context(|| format!("failed to encrypt vCard for {}", path.display()))?;
+                vdir::write_atomic(&path, &encrypted)?;
                 imported += 1;
             }
             Err(err) => {
@@ -555,8 +561,9 @@ fn merge_into_existing(
     email: &str,
     aliases: &HashSet<String>,
     default_region: Option<&str>,
+    provider: &dyn CryptoProvider,
 ) -> Result<bool> {
-    let parsed = vcard_io::parse_file(path, default_region)?;
+    let parsed = vcard_io::parse_file(path, default_region, provider)?;
     let Some(mut card) = parsed.cards.into_iter().next() else {
         return Ok(false);
     };
@@ -594,7 +601,9 @@ fn merge_into_existing(
     if changed {
         vcard_io::touch_rev(&mut card);
         let bytes = vcard_io::card_to_bytes(&card);
-        vdir::write_atomic(path, &bytes)?;
+        let encrypted = provider.encrypt(&bytes)
+            .with_context(|| format!("failed to encrypt vCard for {}", path.display()))?;
+        vdir::write_atomic(path, &encrypted)?;
     }
 
     Ok(changed)
