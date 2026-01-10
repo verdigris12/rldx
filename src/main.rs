@@ -48,13 +48,24 @@ struct ImportArgs {
     #[arg(long)]
     book: Option<String>,
 
-    #[arg(value_name = "FILE")]
+    /// Auto-merge threshold (0.0-1.0). Contacts with FN similarity
+    /// above this threshold will be merged. Recommended: 0.85-0.95
+    #[arg(long)]
+    automerge: Option<f64>,
+
+    /// Number of threads for parallel processing (maildir only).
+    /// Defaults to number of CPU cores.
+    #[arg(long, short = 'j')]
+    threads: Option<usize>,
+
+    #[arg(value_name = "PATH")]
     input: String,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
 enum ImportFormat {
     Google,
+    Maildir,
 }
 
 fn main() -> Result<()> {
@@ -122,6 +133,13 @@ fn handle_query(args: QueryArgs) -> Result<()> {
 }
 
 fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
+    // Validate automerge threshold
+    if let Some(threshold) = args.automerge {
+        if !(0.0..=1.0).contains(&threshold) {
+            anyhow::bail!("--automerge threshold must be between 0.0 and 1.0");
+        }
+    }
+
     let normalize_report = vdir::normalize(&config.vdir, config.phone_region.as_deref())?;
     if !normalize_report.needs_upgrade.is_empty() {
         eprintln!(
@@ -130,17 +148,68 @@ fn handle_import(args: ImportArgs, config: &Config) -> Result<()> {
         );
     }
 
-    let imported = match args.format {
-        ImportFormat::Google => import::google::import_google_contacts(
-            Path::new(&args.input),
-            config,
-            args.book.as_deref(),
-        )?,
+    let mut db = Database::open()?;
+
+    match args.format {
+        ImportFormat::Google => {
+            let result = import::google::import_google_contacts(
+                Path::new(&args.input),
+                config,
+                args.book.as_deref(),
+                args.automerge,
+                &mut db,
+            )?;
+
+            println!("Imported {} contacts.", result.imported);
+
+            if !result.merged.is_empty() {
+                println!("Auto-merged {} contacts:", result.merged.len());
+                for merge in &result.merged {
+                    println!(
+                        "  {} <{}> -> {} ({:.2})",
+                        merge.name, merge.email, merge.merged_into, merge.score
+                    );
+                }
+            }
+
+            if result.skipped > 0 {
+                println!(
+                    "Skipped {} contacts (duplicate email or conversion error).",
+                    result.skipped
+                );
+            }
+        }
+        ImportFormat::Maildir => {
+            let result = import::maildir::import_maildir(
+                Path::new(&args.input),
+                config,
+                args.book.as_deref(),
+                args.automerge,
+                args.threads,
+                &mut db,
+            )?;
+
+            println!("Imported {} contacts.", result.imported);
+
+            if !result.merged.is_empty() {
+                println!("Auto-merged {} contacts:", result.merged.len());
+                for merge in &result.merged {
+                    println!(
+                        "  {} <{}> -> {} ({:.2})",
+                        merge.name, merge.email, merge.merged_into, merge.score
+                    );
+                }
+            }
+
+            if result.skipped > 0 {
+                println!(
+                    "Skipped {} addresses (no name, too short, or duplicate email).",
+                    result.skipped
+                );
+            }
+        }
     };
 
-    println!("Imported {imported} contacts.");
-
-    let mut db = Database::open()?;
     reindex(&mut db, config, false)?;
     Ok(())
 }

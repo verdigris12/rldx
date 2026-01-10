@@ -1,18 +1,44 @@
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use strsim::jaro_winkler;
+
+use vcard4::property::TextProperty;
+use vcard4::Vcard;
 
 use crate::config::Config;
+use crate::db::Database;
+use crate::search;
 use crate::vcard_io;
 use crate::vdir;
-
-use vcard4::Vcard;
 
 const BEGIN_VCARD: &str = "BEGIN:VCARD";
 const END_VCARD: &str = "END:VCARD";
 
-pub fn import_google_contacts(input: &Path, config: &Config, book: Option<&str>) -> Result<usize> {
+/// Result of Google import operation
+pub struct ImportResult {
+    pub imported: usize,
+    pub merged: Vec<MergeInfo>,
+    pub skipped: usize,
+}
+
+/// Information about a merged contact
+pub struct MergeInfo {
+    pub email: String,
+    pub name: String,
+    pub merged_into: String,
+    pub score: f64,
+}
+
+pub fn import_google_contacts(
+    input: &Path,
+    config: &Config,
+    book: Option<&str>,
+    automerge_threshold: Option<f64>,
+    db: &mut Database,
+) -> Result<ImportResult> {
     let content = fs::read_to_string(input).with_context(|| {
         format!(
             "failed to read Google Contacts export at {}",
@@ -39,10 +65,61 @@ pub fn import_google_contacts(input: &Path, config: &Config, book: Option<&str>)
 
     let mut used_names = vdir::existing_stems(&target_dir)?;
     let mut imported = 0usize;
+    let mut merged = Vec::new();
+    let mut skipped = 0usize;
+
+    // Load existing contacts for automerge if enabled
+    let existing_contacts = if automerge_threshold.is_some() {
+        db.list_all_fn_norm()?
+    } else {
+        Vec::new()
+    };
 
     for (index, card_lines) in cards.iter().enumerate() {
         match convert_google_card(card_lines, config.phone_region.as_deref()) {
             Ok(mut card) => {
+                // Get the FN and primary email for automerge check
+                let fn_value = card
+                    .formatted_name
+                    .first()
+                    .map(|p| p.value.clone())
+                    .unwrap_or_default();
+
+                let primary_email = card.email.first().map(|e| e.value.clone());
+
+                // Skip if primary email already exists
+                if let Some(ref email) = primary_email {
+                    if db.email_exists(email)? {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+
+                // Try automerge if enabled
+                if let Some(threshold) = automerge_threshold {
+                    if !fn_value.is_empty() {
+                        if let Some((path, display_fn, score)) =
+                            find_merge_candidate(&existing_contacts, &fn_value, threshold)
+                        {
+                            // Merge into existing contact
+                            if merge_card_into_existing(
+                                &path,
+                                &card,
+                                config.phone_region.as_deref(),
+                            )? {
+                                merged.push(MergeInfo {
+                                    email: primary_email.unwrap_or_default(),
+                                    name: fn_value,
+                                    merged_into: display_fn,
+                                    score,
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                // Create new contact
                 let uuid = vcard_io::ensure_uuid_uid(&mut card)?;
                 vcard_io::touch_rev(&mut card);
 
@@ -57,11 +134,135 @@ pub fn import_google_contacts(input: &Path, config: &Config, book: Option<&str>)
                     "warning: skipping contact #{}, conversion failed: {err}",
                     index + 1
                 );
+                skipped += 1;
             }
         }
     }
 
-    Ok(imported)
+    Ok(ImportResult {
+        imported,
+        merged,
+        skipped,
+    })
+}
+
+/// Find a merge candidate using fuzzy matching on FN
+fn find_merge_candidate(
+    existing_contacts: &[(PathBuf, String, String)],
+    name: &str,
+    threshold: f64,
+) -> Option<(PathBuf, String, f64)> {
+    let name_norm = search::normalize(name);
+
+    let mut best_match: Option<(PathBuf, String, f64)> = None;
+
+    for (path, display_fn, fn_norm) in existing_contacts {
+        let score = jaro_winkler(&name_norm, fn_norm);
+
+        if score >= threshold {
+            match &best_match {
+                Some((_, _, best_score)) if score > *best_score => {
+                    best_match = Some((path.clone(), display_fn.clone(), score));
+                }
+                None => {
+                    best_match = Some((path.clone(), display_fn.clone(), score));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    best_match
+}
+
+/// Merge a card's data into an existing vCard
+fn merge_card_into_existing(
+    path: &Path,
+    source: &Vcard,
+    default_region: Option<&str>,
+) -> Result<bool> {
+    let parsed = vcard_io::parse_file(path, default_region)?;
+    let Some(mut card) = parsed.cards.into_iter().next() else {
+        return Ok(false);
+    };
+
+    let mut changed = false;
+
+    // Merge emails
+    let existing_emails: HashSet<String> = card
+        .email
+        .iter()
+        .map(|e| e.value.to_lowercase())
+        .collect();
+
+    for email in &source.email {
+        if !existing_emails.contains(&email.value.to_lowercase()) {
+            card.email.push(email.clone());
+            changed = true;
+        }
+    }
+
+    // Merge phone numbers
+    let existing_phones: HashSet<String> = card
+        .tel
+        .iter()
+        .map(|t| match t {
+            vcard4::property::TextOrUriProperty::Text(p) => p.value.clone(),
+            vcard4::property::TextOrUriProperty::Uri(u) => u.value.to_string(),
+        })
+        .collect();
+
+    for tel in &source.tel {
+        let tel_value = match tel {
+            vcard4::property::TextOrUriProperty::Text(p) => p.value.clone(),
+            vcard4::property::TextOrUriProperty::Uri(u) => u.value.to_string(),
+        };
+        if !existing_phones.contains(&tel_value) {
+            card.tel.push(tel.clone());
+            changed = true;
+        }
+    }
+
+    // Merge nicknames
+    let existing_nicknames: HashSet<String> = card
+        .nickname
+        .iter()
+        .map(|n| n.value.to_lowercase())
+        .collect();
+
+    for nickname in &source.nickname {
+        if !existing_nicknames.contains(&nickname.value.to_lowercase()) {
+            card.nickname.push(nickname.clone());
+            changed = true;
+        }
+    }
+
+    // Merge additional FN values as nicknames (if different from primary)
+    let card_fn = card
+        .formatted_name
+        .first()
+        .map(|p| p.value.to_lowercase())
+        .unwrap_or_default();
+
+    for fn_prop in source.formatted_name.iter().skip(1) {
+        let fn_lower = fn_prop.value.to_lowercase();
+        if fn_lower != card_fn && !existing_nicknames.contains(&fn_lower) {
+            card.nickname.push(TextProperty {
+                group: None,
+                value: fn_prop.value.clone(),
+                parameters: None,
+            });
+            changed = true;
+        }
+    }
+
+    if changed {
+        vcard_io::touch_rev(&mut card);
+        let bytes = vcard_io::card_to_bytes(&card);
+        vdir::write_atomic(path, &bytes)?;
+    }
+
+    Ok(changed)
 }
 
 fn split_cards(content: &str) -> Vec<Vec<String>> {

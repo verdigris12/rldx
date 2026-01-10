@@ -494,6 +494,36 @@ impl Database {
         }
         Ok(out)
     }
+
+    /// List all contacts with their normalized FN for fuzzy matching
+    pub fn list_all_fn_norm(&self) -> Result<Vec<(PathBuf, String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, fn, fn_norm FROM items WHERE fn_norm IS NOT NULL")?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                PathBuf::from(row.get::<_, String>(0)?),
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Check if an email already exists in the database
+    pub fn email_exists(&self, email: &str) -> Result<bool> {
+        let email_norm = search::normalize(email);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM props WHERE field = 'EMAIL' AND value_norm = ?1 LIMIT 1")?;
+        Ok(stmt.exists(params![email_norm])?)
+    }
 }
 
 fn row_to_list_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContactListEntry> {
