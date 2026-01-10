@@ -148,6 +148,7 @@ skip_local_patterns = [
     "bounce",
     "auto-reply",
     "autoreply",
+    "automated"
 ]
 
 # Domain patterns to skip (case-insensitive).
