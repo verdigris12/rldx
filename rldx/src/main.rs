@@ -29,6 +29,14 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Import(ImportArgs),
+    /// Query contacts for email addresses (abook-compatible output for aerc/mutt)
+    Query(QueryArgs),
+}
+
+#[derive(Args, Debug)]
+struct QueryArgs {
+    /// Search term (matches name, email, nickname, org)
+    query: String,
 }
 
 #[derive(Args, Debug)]
@@ -58,6 +66,10 @@ fn main() -> Result<()> {
                 handle_import(args, &config)?;
                 return Ok(());
             }
+            Command::Query(args) => {
+                handle_query(args)?;
+                return Ok(());
+            }
         }
     }
 
@@ -76,6 +88,34 @@ fn main() -> Result<()> {
 
     let mut app = ui::app::App::new(&mut db, &config)?;
     app.run()?;
+
+    Ok(())
+}
+
+fn handle_query(args: QueryArgs) -> Result<()> {
+    let db = Database::open()?;
+    let results = db.query_emails(&args.query)?;
+
+    // Header line (abook-compatible, ignored by mutt/aerc)
+    if results.is_empty() {
+        println!("No matches for \"{}\"", args.query);
+    } else {
+        println!(
+            "Found {} contact(s) matching \"{}\"",
+            results.len(),
+            args.query
+        );
+    }
+
+    // Results: email<TAB>name<TAB>notes (abook mutt-query format)
+    for r in results {
+        println!(
+            "{}\t{}\t{}",
+            r.email,
+            r.display_fn,
+            r.notes.as_deref().unwrap_or(" ")
+        );
+    }
 
     Ok(())
 }

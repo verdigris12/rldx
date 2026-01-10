@@ -61,6 +61,14 @@ pub struct PropRow {
     pub seq: i64,
 }
 
+/// Result from query_emails() for abook-compatible output
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    pub email: String,
+    pub display_fn: String,
+    pub notes: Option<String>,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -431,6 +439,58 @@ impl Database {
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Query contacts for email addresses (abook-compatible output).
+    /// Returns primary email, formatted name, and optional notes for each matching contact.
+    pub fn query_emails(&self, filter: &str) -> Result<Vec<QueryResult>> {
+        let normalized = search::normalize_query(filter);
+        let pattern = normalized
+            .as_ref()
+            .map(|n| search::like_pattern(n))
+            .unwrap_or_else(|| "%".to_string());
+
+        // Query: for each contact matching the filter, get primary EMAIL (lowest seq),
+        // the FN from items table, and optionally NOTE from props
+        let sql = r#"
+            SELECT
+                i.fn,
+                (SELECT p.value FROM props p WHERE p.uuid = i.uuid AND p.field = 'EMAIL' ORDER BY p.seq LIMIT 1) AS email,
+                (SELECT p.value FROM props p WHERE p.uuid = i.uuid AND p.field = 'NOTE' ORDER BY p.seq LIMIT 1) AS notes
+            FROM items i
+            WHERE i.fn_norm LIKE ?1
+               OR EXISTS (
+                   SELECT 1 FROM props WHERE props.uuid = i.uuid
+                     AND props.field IN ('NICKNAME', 'ORG', 'EMAIL', 'TEL')
+                     AND props.value_norm LIKE ?1
+               )
+            ORDER BY i.fn COLLATE NOCASE
+        "#;
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([&pattern], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (display_fn, email, notes) = row?;
+            // Only include contacts that have an email address
+            if let Some(email) = email {
+                if !email.is_empty() {
+                    out.push(QueryResult {
+                        email,
+                        display_fn,
+                        notes,
+                    });
+                }
+            }
         }
         Ok(out)
     }
