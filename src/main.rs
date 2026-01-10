@@ -3,6 +3,7 @@ mod db;
 mod import;
 mod indexer;
 mod search;
+mod translit;
 mod ui;
 mod vcard_io;
 mod vdir;

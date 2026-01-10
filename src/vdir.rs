@@ -116,6 +116,10 @@ fn process_cards(
         let mut card = card_src.card.clone();
         let uuid = vcard_io::ensure_uuid_uid(&mut card)?;
         vcard_io::touch_rev(&mut card);
+
+        // Apply transliteration for non-Latin scripts
+        vcard_io::transliterate_card(&mut card);
+
         let short_name = select_filename(&uuid, used_names, original_stem.as_deref());
         let target = vdir.join(format!("{short_name}.vcf"));
 
