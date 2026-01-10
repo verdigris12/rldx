@@ -494,6 +494,249 @@ pub fn delete_nickname_entry(card: &mut Vcard, index: usize) -> bool {
     true
 }
 
+/// Delete a field entry by field name and sequence number
+pub fn delete_card_field(card: &mut Vcard, field: &str, seq: usize) -> bool {
+    match field.to_ascii_uppercase().as_str() {
+        "TEL" => {
+            if seq < card.tel.len() {
+                card.tel.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "EMAIL" => {
+            if seq < card.email.len() {
+                card.email.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "NICKNAME" => delete_nickname_entry(card, seq),
+        "NOTE" => {
+            if seq < card.note.len() {
+                card.note.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "URL" => {
+            if seq < card.url.len() {
+                card.url.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "ADR" => {
+            if seq < card.address.len() {
+                card.address.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "ORG" => {
+            if seq < card.org.len() {
+                card.org.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "TITLE" => {
+            if seq < card.title.len() {
+                card.title.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "ROLE" => {
+            if seq < card.role.len() {
+                card.role.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "IMPP" => {
+            if seq < card.impp.len() {
+                card.impp.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        "PHOTO" => {
+            if seq < card.photo.len() {
+                card.photo.remove(seq);
+                true
+            } else {
+                false
+            }
+        }
+        _ => {
+            // Try extension properties
+            let field_upper = field.to_ascii_uppercase();
+            let mut found_idx = None;
+            let mut current_seq = 0usize;
+            for (idx, ext) in card.extensions.iter().enumerate() {
+                if ext.name.eq_ignore_ascii_case(&field_upper) {
+                    if current_seq == seq {
+                        found_idx = Some(idx);
+                        break;
+                    }
+                    current_seq += 1;
+                }
+            }
+            if let Some(idx) = found_idx {
+                card.extensions.remove(idx);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Add a new field to the card
+pub fn add_card_field(
+    card: &mut Vcard,
+    field: &str,
+    value: &str,
+    type_param: Option<&str>,
+) -> bool {
+    use vcard4::property::{TextProperty, UriProperty};
+    use vcard4::parameter::{Parameters, TypeParameter};
+    
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return false;
+    }
+    
+    // Build parameters if type is specified
+    let parameters = type_param.map(|t| {
+        let mut params = Parameters::default();
+        // Parse type parameter
+        let type_val = match t.to_ascii_lowercase().as_str() {
+            "work" => TypeParameter::Work,
+            "home" => TypeParameter::Home,
+            "cell" | "mobile" => TypeParameter::Telephone(vcard4::parameter::TelephoneType::Cell),
+            "voice" => TypeParameter::Telephone(vcard4::parameter::TelephoneType::Voice),
+            "fax" => TypeParameter::Telephone(vcard4::parameter::TelephoneType::Fax),
+            "pager" => TypeParameter::Telephone(vcard4::parameter::TelephoneType::Pager),
+            "text" => TypeParameter::Telephone(vcard4::parameter::TelephoneType::Text),
+            "video" => TypeParameter::Telephone(vcard4::parameter::TelephoneType::Video),
+            _ => TypeParameter::Extension(t.to_string()),
+        };
+        params.types = Some(vec![type_val]);
+        params
+    });
+    
+    match field.to_ascii_uppercase().as_str() {
+        "TEL" => {
+            card.tel.push(vcard4::property::TextOrUriProperty::Text(TextProperty {
+                group: None,
+                value: trimmed,
+                parameters,
+            }));
+            true
+        }
+        "EMAIL" => {
+            card.email.push(TextProperty {
+                group: None,
+                value: trimmed,
+                parameters,
+            });
+            true
+        }
+        "NICKNAME" => {
+            card.nickname.push(TextProperty {
+                group: None,
+                value: trimmed,
+                parameters: None,
+            });
+            true
+        }
+        "NOTE" => {
+            card.note.push(TextProperty {
+                group: None,
+                value: trimmed,
+                parameters: None,
+            });
+            true
+        }
+        "URL" => {
+            if let Ok(uri) = trimmed.parse::<Uri>() {
+                card.url.push(UriProperty {
+                    group: None,
+                    value: uri,
+                    parameters,
+                });
+                true
+            } else {
+                false
+            }
+        }
+        "ORG" => {
+            card.org.push(vcard4::property::TextListProperty::new_semi_colon(vec![trimmed]));
+            true
+        }
+        "TITLE" => {
+            card.title.push(TextProperty {
+                group: None,
+                value: trimmed,
+                parameters: None,
+            });
+            true
+        }
+        "ROLE" => {
+            card.role.push(TextProperty {
+                group: None,
+                value: trimmed,
+                parameters: None,
+            });
+            true
+        }
+        _ if field.to_ascii_uppercase().starts_with("X-") => {
+            // Extension property
+            card.extensions.push(vcard4::property::ExtensionProperty {
+                group: None,
+                name: field.to_ascii_uppercase(),
+                value: vcard4::property::AnyProperty::Text(trimmed),
+                parameters: None,
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Set the PHOTO property with a data URI
+pub fn set_photo(card: &mut Vcard, data_uri: &str) {
+    use vcard4::property::{TextOrUriProperty, UriProperty};
+    
+    // Clear existing photos
+    card.photo.clear();
+    
+    // Parse as URI - data URIs are valid URIs
+    if let Ok(uri) = data_uri.parse::<Uri>() {
+        card.photo.push(TextOrUriProperty::Uri(UriProperty {
+            group: None,
+            value: uri,
+            parameters: None,
+        }));
+    }
+}
+
+/// Delete all PHOTO properties
+pub fn delete_photo(card: &mut Vcard) {
+    card.photo.clear();
+}
+
 // =============================================================================
 // Transliteration support (ALTID/LANGUAGE)
 // =============================================================================

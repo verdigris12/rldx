@@ -14,8 +14,7 @@ use tui_widgets::popup::Popup;
 
 use crate::config::{RgbColor, TopBarButton};
 
-use super::app::{App, MultiValueField, PaneField, PaneFocus, SearchFocus, SearchRow};
-use super::panes::DetailTab;
+use super::app::{AddFieldState, App, DetailsField, DetailsSection, MultiValueField, PaneField, PaneFocus, SearchFocus, SearchRow, STANDARD_PROPERTIES, TYPE_VALUES};
 
 const MULTIVALUE_HELP: &str =
     "j/k: nav  Space: copy  Enter: default  e: edit  q/Esc: close";
@@ -24,6 +23,8 @@ const ALIAS_MODAL_HELP: &str =
 const SEARCH_HELP_INPUT: &str =
     "Type to filter  Esc: focus results  Enter: open";
 const ADD_ALIAS_HELP: &str = "Type alias  Enter: add  Esc: cancel";
+const ADD_FIELD_HELP: &str = "j/k: nav  Enter: select  Esc: back/close";
+const PHOTO_PATH_HELP: &str = "Enter path to image  Enter: set  Esc: cancel";
 const HELP_MODAL_FOOTER: &str = "j/k: scroll  Esc/q: close";
 
 pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
@@ -46,6 +47,8 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App) {
     draw_body(frame, layout[1], app);
     draw_footer(frame, layout[2], app);
     draw_alias_modal(frame, size, app);
+    draw_add_field_modal(frame, size, app);
+    draw_photo_path_modal(frame, size, app);
     draw_multivalue_modal(frame, size, app);
     draw_confirm_modal(frame, size, app);
     draw_help_modal(frame, size, app);
@@ -213,24 +216,36 @@ fn draw_body(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 }
 
 fn draw_content(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
-    let image_height = app.image_pane_height().min(area.height);
-    let upper_height = image_height.min(area.height);
+    // Add 1-line gap at top to separate from F-button bar
+    let top_gap = 1u16;
+    if area.height <= top_gap {
+        return;
+    }
+    let content_area = Rect {
+        x: area.x,
+        y: area.y + top_gap,
+        width: area.width,
+        height: area.height - top_gap,
+    };
 
-    let main_height = upper_height.min(area.height);
-    let lower_start = area.y + upper_height;
+    let image_height = app.image_pane_height().min(content_area.height);
+    let upper_height = image_height.min(content_area.height);
+
+    let main_height = upper_height.min(content_area.height);
+    let lower_start = content_area.y + upper_height;
 
     let top_rect = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
+        x: content_area.x,
+        y: content_area.y,
+        width: content_area.width,
         height: upper_height,
     };
 
     let lower_rect = Rect {
-        x: area.x,
+        x: content_area.x,
         y: lower_start,
-        width: area.width,
-        height: area.height.saturating_sub(upper_height),
+        width: content_area.width,
+        height: content_area.height.saturating_sub(upper_height),
     };
 
     let image_width = app.image_pane_width();
@@ -270,7 +285,7 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
 
     if lower_rect.height > 0 {
-        draw_tabs(frame, lower_rect, app);
+        draw_details_pane(frame, lower_rect, app);
     }
 }
 
@@ -387,33 +402,25 @@ fn draw_search_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let active = matches!(app.focused_pane, PaneFocus::Card);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style(app, active));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
+    
+    if area.width < 2 || area.height < 2 {
         return;
     }
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
-        .split(inner);
+    // Render panel header (row 0) - fills entire width with accent background
+    let title = app.current_contact
+        .as_ref()
+        .map(|c| c.display_fn.to_uppercase())
+        .unwrap_or_else(|| "NO CONTACT SELECTED".to_string());
+    let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    render_panel_header(frame, header_area, &title, '1', app);
 
-    let header_line = if let Some(contact) = &app.current_contact {
-        Line::from(Span::styled(
-            contact.display_fn.to_uppercase(),
-            header_text_style(app),
-        ))
-    } else {
-        Line::from(Span::styled(
-            "NO CONTACT SELECTED".to_string(),
-            header_text_style(app),
-        ))
-    };
-    render_header_with_separator(frame, layout[0], header_line, app, None, area.width);
+    // Render panel borders (left, right, bottom) and get content area
+    let content_area = render_panel_borders(frame, area, app, active);
+    
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
 
     let mut lines: Vec<Line> = Vec::new();
     let mut cursor = None;
@@ -443,11 +450,11 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), layout[1]);
+    frame.render_widget(Paragraph::new(lines), content_area);
 
     if let Some((line_idx, column)) = cursor {
-        let x = layout[1].x.saturating_add(column as u16);
-        let y = layout[1].y.saturating_add(line_idx as u16);
+        let x = content_area.x.saturating_add(column as u16);
+        let y = content_area.y.saturating_add(line_idx as u16);
         frame.set_cursor_position((x, y));
     }
 }
@@ -822,20 +829,26 @@ fn draw_share_modal(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_image(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style(app, false))
-        .title("Image");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let focused = matches!(app.focused_pane, PaneFocus::Image);
 
-    if inner.width == 0 || inner.height == 0 {
+    if area.width < 2 || area.height < 2 {
         return;
     }
 
-    frame.render_widget(Clear, inner);
+    // Render panel header (row 0) - fills entire width with accent background
+    let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    render_panel_header(frame, header_area, "IMAGE", '3', app);
 
-    let render_area = image_render_area(app, inner);
+    // Render panel borders (left, right, bottom) and get content area
+    let content_area = render_panel_borders(frame, area, app, focused);
+
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Clear, content_area);
+
+    let render_area = image_render_area(app, content_area);
 
     if let Some(state) = app.profile_image_state() {
         let widget = StatefulImage::new(None).resize(Resize::Fit);
@@ -844,7 +857,7 @@ fn draw_image(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
 
     if let Some(error) = app.photo_error() {
-        render_centered_words(frame, inner, error);
+        render_centered_words(frame, content_area, error);
         return;
     }
 
@@ -854,7 +867,7 @@ fn draw_image(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         } else {
             "NO IMAGE AVAILABLE"
         };
-        render_centered_words(frame, inner, message);
+        render_centered_words(frame, content_area, message);
     }
 }
 
@@ -917,65 +930,231 @@ fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     value / divisor + u32::from(value % divisor != 0)
 }
 
-fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let focused = matches!(app.focused_pane, PaneFocus::Detail(current) if current == app.tab);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style(app, focused));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+fn draw_details_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let focused = matches!(app.focused_pane, PaneFocus::Details);
 
-    if inner.width == 0 || inner.height == 0 {
+    if area.width < 2 || area.height < 2 {
         return;
     }
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
-        .split(inner);
+    // Render panel header (row 0) - fills entire width with accent background
+    let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    render_panel_header(frame, header_area, "DETAILS", '2', app);
 
-    render_header_with_separator(frame, layout[0], build_tab_header(app), app, None, area.width);
+    // Render panel borders (left, right, bottom) and get content area
+    let content_area = render_panel_borders(frame, area, app, focused);
 
-    let tab_index = app.tab.index();
-    let fields = &app.tab_fields[tab_index];
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
 
+    // Build all lines from sections
+    // Track which line indices are section separators (for ├─┤ rendering)
     let mut lines: Vec<Line> = Vec::new();
-    let mut cursor = None;
-    if fields.is_empty() {
-        lines.push(Line::from("No data"));
-    } else {
-        // Calculate max label width for alignment (label + colon)
-        let label_width = fields
-            .iter()
-            .map(|f| f.label.len() + 1) // +1 for colon
-            .max()
-            .unwrap_or(0);
+    let mut section_separator_indices: Vec<usize> = Vec::new();
+    let mut field_line_indices: Vec<usize> = Vec::new(); // Maps flat field index to line index
+    let mut flat_field_index = 0usize;
 
-        for (idx, field) in fields.iter().enumerate() {
-            let highlight = focused && idx == app.tab_field_indices[tab_index];
-            let line_index = lines.len();
-            let (line, cursor_info) = field_line(app, field, highlight, label_width);
-            if cursor.is_none() {
-                if let Some(column) = cursor_info {
-                    cursor = Some((line_index, column));
-                }
-            }
+    for section in &app.details_sections {
+        // Blank line before section separator
+        lines.push(Line::from(""));
+        
+        // Section separator line: ─ SectionName ──────────────
+        // (├ and ┤ will be rendered separately over the border)
+        section_separator_indices.push(lines.len());
+        let section_header = render_section_header(&section.name, content_area.width as usize);
+        lines.push(Line::from(Span::styled(section_header, separator_style(app))));
+        
+        // Blank line after section separator
+        lines.push(Line::from(""));
+        
+        // Collect all unique TYPE values for this section to build column headers
+        let type_columns = collect_section_type_columns(section);
+        let has_note_column = section.fields.iter().any(|f| f.note.is_some());
+        
+        // Calculate column widths for this section
+        let label_width = section.fields.iter()
+            .map(|f| f.label.len())
+            .max()
+            .unwrap_or(0)
+            .max(5); // Minimum label width
+        
+        // Add column header row if there are type columns or notes
+        if !type_columns.is_empty() || has_note_column {
+            let header_line = build_section_column_header(
+                app,
+                label_width,
+                &type_columns,
+                has_note_column,
+                content_area.width as usize,
+            );
+            lines.push(header_line);
+        }
+        
+        // Add section fields
+        for field in &section.fields {
+            let highlight = focused && flat_field_index == app.details_field_index;
+            field_line_indices.push(lines.len());
+            let line = build_details_field_line(
+                app,
+                field,
+                highlight,
+                label_width,
+                &type_columns,
+                has_note_column,
+            );
             lines.push(line);
+            flat_field_index += 1;
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), layout[1]);
-
-    if let Some((line_idx, column)) = cursor {
-        let x = layout[1].x.saturating_add(column as u16);
-        let y = layout[1].y.saturating_add(line_idx as u16);
-        frame.set_cursor_position((x, y));
+    if lines.is_empty() {
+        lines.push(Line::from("No data"));
     }
+
+    // Apply scroll offset and track visible section separators
+    let scroll = app.details_scroll;
+    let viewport_height = content_area.height as usize;
+    let visible_lines: Vec<Line> = lines
+        .iter()
+        .skip(scroll)
+        .take(viewport_height)
+        .cloned()
+        .collect();
+
+    frame.render_widget(Paragraph::new(visible_lines), content_area);
+
+    // Render ├ and ┤ for visible section separators (use separator_style to match the ─ line)
+    let sep_style = separator_style(app);
+    for &line_idx in &section_separator_indices {
+        // Check if this separator is visible
+        if line_idx >= scroll && line_idx < scroll + viewport_height {
+            let visible_row = line_idx - scroll;
+            let y = content_area.y + visible_row as u16;
+            
+            // Render ├ at left border position (area.x, which is one column left of content)
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(LINE.vertical_right, sep_style))),
+                Rect { x: area.x, y, width: 1, height: 1 }
+            );
+            // Render ┤ at right border position
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(LINE.vertical_left, sep_style))),
+                Rect { x: area.x + area.width - 1, y, width: 1, height: 1 }
+            );
+        }
+    }
+}
+
+/// Render a section header line: ─ Name ─────────────────
+fn render_section_header(name: &str, width: usize) -> String {
+    let prefix = "─ ";
+    let suffix = " ";
+    let name_part = format!("{}{}{}", prefix, name, suffix);
+    let remaining = width.saturating_sub(name_part.len());
+    let dashes = "─".repeat(remaining);
+    format!("{}{}", name_part, dashes)
+}
+
+/// Collect all unique TYPE values from a section's fields
+fn collect_section_type_columns(section: &DetailsSection) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut types: BTreeSet<String> = BTreeSet::new();
+    for field in &section.fields {
+        for t in &field.types {
+            types.insert(t.clone());
+        }
+    }
+    types.into_iter().collect()
+}
+
+/// Build column header row for a section: spaces for label+value, then TYPE TYPE NOTE headers
+fn build_section_column_header(
+    app: &App,
+    label_width: usize,
+    type_columns: &[String],
+    has_note: bool,
+    _total_width: usize,
+) -> Line<'static> {
+    let header_style = header_text_style(app);
+    
+    // Start with padding for label and value columns
+    // Label column: label_width + ": "
+    let label_col_width = label_width + 2;
+    
+    // We'll leave the value column flexible, headers start after a gap
+    let mut spans: Vec<Span> = Vec::new();
+    
+    // Padding for label column
+    spans.push(Span::raw(" ".repeat(label_col_width)));
+    
+    // Value column gets some minimum space, then TYPE headers
+    // The value takes remaining space, but we want to align TYPE headers
+    // For simplicity, add a gap then the headers
+    spans.push(Span::raw("  ")); // gap after value area starts
+    
+    // TYPE column headers
+    for type_name in type_columns {
+        spans.push(Span::styled(format!("{:<6}", type_name), header_style));
+    }
+    
+    // NOTE column header
+    if has_note {
+        spans.push(Span::styled("NOTE", header_style));
+    }
+    
+    Line::from(spans)
+}
+
+/// Build a field line for details pane with aligned columns
+fn build_details_field_line(
+    app: &App,
+    field: &DetailsField,
+    highlight: bool,
+    label_width: usize,
+    type_columns: &[String],
+    has_note_column: bool,
+) -> Line<'static> {
+    let (label_style, value_style) = line_styles(app, highlight);
+    
+    let mut spans: Vec<Span> = Vec::new();
+    
+    // Label column (right-padded)
+    let label_text = format!("{:width$}: ", field.label, width = label_width);
+    spans.push(Span::styled(label_text, label_style));
+    
+    // Value - for now show the value, later we might truncate
+    spans.push(Span::styled(field.value.clone(), value_style));
+    
+    // Add spacing before TYPE columns (if any)
+    if !type_columns.is_empty() || has_note_column {
+        spans.push(Span::raw("  "));
+    }
+    
+    // TYPE columns - show type name if field has it, else empty
+    for type_name in type_columns {
+        if field.types.contains(type_name) {
+            spans.push(Span::styled(format!("{:<6}", type_name), value_style));
+        } else {
+            spans.push(Span::raw("      ")); // 6 spaces to match column width
+        }
+    }
+    
+    // NOTE column
+    if has_note_column {
+        if let Some(note) = &field.note {
+            spans.push(Span::styled(note.clone(), value_style));
+        }
+    }
+    
+    Line::from(spans)
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let message: String = if app.alias_modal.is_some() {
         ADD_ALIAS_HELP.to_string()
+    } else if app.photo_path_modal.is_some() {
+        PHOTO_PATH_HELP.to_string()
     } else if let Some(modal) = app.multivalue_modal() {
         if modal.field() == MultiValueField::Alias {
             ALIAS_MODAL_HELP.to_string()
@@ -1063,21 +1242,197 @@ fn draw_alias_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
 }
 
-fn build_tab_header(app: &App) -> Line<'static> {
-    let mut spans: Vec<Span> = Vec::new();
-    for (idx, tab) in DetailTab::ALL.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::styled(" | ".to_string(), header_text_style(app)));
+fn draw_add_field_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let Some(modal) = &app.add_field_modal else { return; };
+
+    let mut width = area.width.saturating_mul(2).saturating_div(3);
+    let min_width = area.width.min(40);
+    if width < min_width { width = min_width; }
+    if width > area.width { width = area.width; }
+
+    let _content_width = width.saturating_sub(4) as usize;
+
+    // Build content based on current state
+    let (title, lines, cursor_info) = match modal.state {
+        AddFieldState::SelectProperty => {
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(Span::styled("Select property type:", header_text_style(app))));
+            lines.push(Line::from(""));
+
+            for (idx, (display_name, _, _)) in STANDARD_PROPERTIES.iter().enumerate() {
+                let prefix = if idx == modal.property_index { "► " } else { "  " };
+                let style = if idx == modal.property_index {
+                    selection_style(app)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(Span::styled(format!("{}{}", prefix, display_name), style)));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(ADD_FIELD_HELP));
+            ("ADD FIELD", lines, None)
         }
-        let text = format!("{}: {}", tab.digit(), tab.title().to_uppercase());
-        let style = if *tab == app.tab {
-            selection_style(app)
-        } else {
-            header_text_style(app)
-        };
-        spans.push(Span::styled(text, style));
+        AddFieldState::SelectType => {
+            let mut lines: Vec<Line> = Vec::new();
+            let prop_name = modal.current_property().map(|(name, _, _)| name).unwrap_or("Field");
+            lines.push(Line::from(Span::styled(format!("Select type for {}:", prop_name), header_text_style(app))));
+            lines.push(Line::from(""));
+
+            // Option for "no type"
+            let no_type_selected = modal.type_index.is_none();
+            let prefix = if no_type_selected { "► " } else { "  " };
+            let style = if no_type_selected { selection_style(app) } else { Style::default() };
+            lines.push(Line::from(Span::styled(format!("{}(none)", prefix), style)));
+
+            for (idx, type_val) in TYPE_VALUES.iter().enumerate() {
+                let is_selected = modal.type_index == Some(idx);
+                let prefix = if is_selected { "► " } else { "  " };
+                let style = if is_selected { selection_style(app) } else { Style::default() };
+                lines.push(Line::from(Span::styled(format!("{}{}", prefix, type_val), style)));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(ADD_FIELD_HELP));
+            ("SELECT TYPE", lines, None)
+        }
+        AddFieldState::EnterCustomProperty => {
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(Span::styled("Enter custom property name:", header_text_style(app))));
+            lines.push(Line::from(""));
+
+            let label = "X-";
+            let value = modal.custom_property_input.value();
+            lines.push(Line::from(vec![
+                Span::styled(label, header_text_style(app)),
+                Span::raw(value.to_string()),
+            ]));
+
+            lines.push(Line::from(""));
+            lines.push(Line::from("Enter: continue  Esc: back"));
+
+            let cursor_col = label.len() + modal.custom_property_input.visual_cursor();
+            ("CUSTOM PROPERTY", lines, Some((2, cursor_col))) // Line 2 is the input line
+        }
+        AddFieldState::EnterValue => {
+            let mut lines: Vec<Line> = Vec::new();
+            let prop_name = if let Some((name, vcard_field, _)) = modal.current_property() {
+                if vcard_field == "X-" {
+                    let custom = modal.custom_property_input.value().trim();
+                    if custom.is_empty() {
+                        "X-".to_string()
+                    } else if custom.to_uppercase().starts_with("X-") {
+                        custom.to_uppercase()
+                    } else {
+                        format!("X-{}", custom.to_uppercase())
+                    }
+                } else {
+                    name.to_string()
+                }
+            } else {
+                "Field".to_string()
+            };
+
+            let type_suffix = modal.current_type()
+                .map(|t| format!(" ({})", t))
+                .unwrap_or_default();
+
+            lines.push(Line::from(Span::styled(format!("Enter value for {}{}:", prop_name, type_suffix), header_text_style(app))));
+            lines.push(Line::from(""));
+
+            let label = "VALUE: ";
+            let value = modal.value_input.value();
+            lines.push(Line::from(vec![
+                Span::styled(label, header_text_style(app)),
+                Span::raw(value.to_string()),
+            ]));
+
+            lines.push(Line::from(""));
+            lines.push(Line::from("Enter: add field  Esc: back"));
+
+            let cursor_col = label.len() + modal.value_input.visual_cursor();
+            ("ENTER VALUE", lines, Some((2, cursor_col)))
+        }
+    };
+
+    // Calculate height needed
+    let _content_height = lines.len();
+    let body_lines: Vec<Line> = lines.into_iter().collect();
+    let body_text = ratatui::text::Text::from(body_lines.clone());
+
+    let title_line = Line::from(Span::styled(title, header_text_style(app)));
+    let popup = Popup::new(body_text)
+        .title(title_line)
+        .border_style(border_style(app, true));
+
+    frame.render_stateful_widget_ref(popup, area, &mut app.modal_popup);
+
+    // Set cursor if we have an input field active
+    if let Some((line_idx, cursor_col)) = cursor_info {
+        if let Some(popup_area) = app.modal_popup.area() {
+            let inner = Block::default().borders(Borders::ALL).inner(*popup_area);
+            let x = inner.x.saturating_add(cursor_col as u16);
+            let y = inner.y.saturating_add(line_idx as u16);
+            frame.set_cursor_position((x, y));
+        }
     }
-    Line::from(spans)
+}
+
+fn draw_photo_path_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if app.photo_path_modal.is_none() { return; }
+
+    let mut width = area.width.saturating_mul(2).saturating_div(3);
+    let min_width = area.width.min(50);
+    if width < min_width { width = min_width; }
+    if width > area.width { width = area.width; }
+
+    let content_width = width.saturating_sub(2) as usize;
+
+    let label = "PATH: ";
+    let value = app
+        .photo_path_modal
+        .as_ref()
+        .map(|m| m.input.value().to_string())
+        .unwrap_or_default();
+    let line = Line::from(vec![
+        Span::styled(label, header_text_style(app)),
+        Span::raw(value.clone()),
+    ]);
+    let lines = vec![
+        Line::from(Span::styled("Enter path to image file (max 128x128)", header_text_style(app))),
+        Line::from(""),
+        line,
+        Line::from(""),
+        Line::from(PHOTO_PATH_HELP.to_string()),
+    ];
+
+    let body_text = ratatui::text::Text::from(
+        lines
+            .into_iter()
+            .map(|l| {
+                let ln = l;
+                if ln.width() < content_width { /* let popup size itself */ }
+                ln
+            })
+            .collect::<Vec<Line>>()
+    );
+
+    let title_line = Line::from(Span::styled("SET PHOTO", header_text_style(app)));
+    let popup = Popup::new(body_text)
+        .title(title_line)
+        .border_style(border_style(app, true));
+
+    frame.render_stateful_widget_ref(popup, area, &mut app.modal_popup);
+
+    if let Some(popup_area) = app.modal_popup.area() {
+        let inner = Block::default().borders(Borders::ALL).inner(*popup_area);
+        if let Some(m) = app.photo_path_modal.as_ref() {
+            // Cursor on the input line (line index 2)
+            let x = inner.x.saturating_add(label.len() as u16 + m.input.visual_cursor() as u16);
+            let y = inner.y.saturating_add(2); // Line index 2 is the input line
+            frame.set_cursor_position((x, y));
+        }
+    }
 }
 
 fn field_line(
@@ -1155,6 +1510,110 @@ fn separator_style(app: &App) -> Style {
     Style::default().fg(color(colors.separator))
 }
 
+/// Render a panel header: 1-line with accent background, title left-aligned, "| #" right-aligned
+/// Uses half-block characters at edges: ▐ (right half) on left, ▌ (left half) on right
+fn render_panel_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    panel_number: char,
+    app: &App,
+) {
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+
+    let colors = app.ui_colors();
+    let header_style = Style::default()
+        .fg(color(colors.selection_fg))
+        .bg(color(colors.selection_bg));
+
+    // Half-block characters for visual corners
+    const RIGHT_HALF_BLOCK: &str = "▐";  // Right half block (U+2590) - creates left edge
+    const LEFT_HALF_BLOCK: &str = "▌"; // Left half block (U+258C) - creates right edge
+
+    // Build the line: "▐TITLE ... | #▌"
+    let suffix = format!("| {}", panel_number);
+    let title_len = title.len();
+    let suffix_len = suffix.len();
+    // Available space for content (excluding the two half-block chars)
+    let inner_width = (area.width as usize).saturating_sub(2);
+
+    // Calculate padding between title and suffix
+    let padding_needed = inner_width.saturating_sub(title_len + suffix_len);
+    let padding = " ".repeat(padding_needed);
+
+    let line = Line::from(vec![
+        Span::styled(LEFT_HALF_BLOCK, header_style),
+        Span::styled(title.to_string(), header_style),
+        Span::styled(padding, header_style),
+        Span::styled(suffix, header_style),
+        Span::styled(RIGHT_HALF_BLOCK, header_style),
+    ]);
+
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Render panel borders (left, right, bottom) and return the content area.
+/// The header row is assumed to be already rendered at area.y.
+/// This renders:
+/// - Left border (│) from row 1 to row height-2
+/// - Right border (│) from row 1 to row height-2  
+/// - Bottom border (└───┘) at row height-1
+fn render_panel_borders(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    focused: bool,
+) -> Rect {
+    if area.width < 2 || area.height < 2 {
+        return Rect::default();
+    }
+
+    let border_style = border_style(app, focused);
+    
+    // Content area is inside the borders, starting from row 1 (after header)
+    let content_area = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2), // -1 for header, -1 for bottom border
+    };
+
+    // Render left and right borders for content rows
+    for row in 1..area.height.saturating_sub(1) {
+        let y = area.y + row;
+        // Left border
+        let left_span = Span::styled(LINE.vertical, border_style);
+        frame.render_widget(
+            Paragraph::new(Line::from(left_span)),
+            Rect { x: area.x, y, width: 1, height: 1 }
+        );
+        // Right border
+        let right_span = Span::styled(LINE.vertical, border_style);
+        frame.render_widget(
+            Paragraph::new(Line::from(right_span)),
+            Rect { x: area.x + area.width - 1, y, width: 1, height: 1 }
+        );
+    }
+
+    // Render bottom border
+    let bottom_y = area.y + area.height - 1;
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let bottom_line = format!(
+        "{}{}{}",
+        LINE.bottom_left,
+        LINE.horizontal.repeat(inner_width),
+        LINE.bottom_right
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(bottom_line, border_style))),
+        Rect { x: area.x, y: bottom_y, width: area.width, height: 1 }
+    );
+
+    content_area
+}
+
 fn render_centered_words(frame: &mut Frame<'_>, area: Rect, text: &str) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1183,65 +1642,6 @@ fn render_centered_words(frame: &mut Frame<'_>, area: Rect, text: &str) {
     };
 
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), target);
-}
-
-/// Render a header line with a separator below it.
-/// `area` is the inner content area for the header.
-/// `outer_width` is the full pane width (including borders) for drawing connected separators.
-fn render_header_with_separator(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    content: Line<'static>,
-    app: &App,
-    style: Option<Style>,
-    outer_width: u16,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    if area.height == 1 {
-        let paragraph = if let Some(style) = style {
-            Paragraph::new(content).style(style)
-        } else {
-            Paragraph::new(content)
-        };
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
-        .split(area);
-
-    let paragraph = if let Some(style) = style {
-        Paragraph::new(content).style(style)
-    } else {
-        Paragraph::new(content)
-    };
-
-    frame.render_widget(paragraph, layout[0]);
-
-    // Build separator with connector characters: ├───┤
-    // The separator spans the full outer width to connect with side borders
-    let inner_width = outer_width.saturating_sub(2) as usize; // exclude border chars
-    let separator = format!(
-        "{}{}{}",
-        LINE.vertical_right,
-        LINE.horizontal.to_string().repeat(inner_width),
-        LINE.vertical_left
-    );
-    let separator_line = Line::from(Span::styled(separator, separator_style(app)));
-    
-    // Render at the separator row, but shifted left by 1 to start at the border
-    let separator_area = Rect {
-        x: layout[1].x.saturating_sub(1),
-        y: layout[1].y,
-        width: outer_width,
-        height: 1,
-    };
-    frame.render_widget(Paragraph::new(separator_line), separator_area);
 }
 
 fn color(rgb: RgbColor) -> Color {

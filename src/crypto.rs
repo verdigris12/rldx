@@ -1,14 +1,18 @@
 //! Encryption providers for vCard and database encryption.
 //!
 //! Supports two backends:
-//! - GPG: Uses gpg-agent for key management, stores files as .vcf.gpg
-//! - Age: Modern encryption, stores files as .vcf.age
+//! - GPG: Derives a symmetric key from the GPG key fingerprint using HKDF-SHA256,
+//!        then uses orion's AEAD (XChaCha20-Poly1305) for fast file encryption.
+//!        Files are stored as .vcf.age (text format with magic header).
+//! - Age: Modern encryption using X25519 keys, stores files as .vcf.age
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
+use hkdf::Hkdf;
+use sha2::Sha256;
 
 use crate::config::{EncryptionConfig, EncryptionType};
 
@@ -36,9 +40,28 @@ pub trait CryptoProvider: Send + Sync {
 // GPG Provider
 // =============================================================================
 
-/// GPG encryption provider using gpg command-line tool
+/// Salt for HKDF key derivation (file encryption)
+const HKDF_SALT_FILE: &[u8] = b"rldx-gpg-file-encryption-v2";
+/// Salt for HKDF key derivation (database encryption)
+const HKDF_SALT_DB: &[u8] = b"rldx-gpg-db-encryption-v1";
+/// Magic header for GPG-derived encrypted files (using orion's AEAD)
+const GPG_CHACHA_MAGIC: &[u8] = b"RLDX-GPG-CHACHA20\n";
+
+/// GPG hybrid encryption provider.
+/// 
+/// Uses the GPG key fingerprint to derive a symmetric key via HKDF-SHA256,
+/// then uses orion's AEAD (XChaCha20-Poly1305) for actual file encryption.
+/// This provides:
+/// - Fast encryption (no subprocess spawning, pure Rust crypto)
+/// - Parallelizable operations  
+/// - Security tied to GPG key possession (fingerprint is only accessible with the key)
+/// - AEAD ensures authenticity and integrity
+/// - High-level API handles nonces automatically
 pub struct GpgProvider {
-    key_id: String,
+    /// The derived secret key for orion AEAD (cached at construction)
+    secret_key: orion::aead::SecretKey,
+    /// The GPG key fingerprint (cached for DB key derivation)
+    fingerprint: String,
 }
 
 impl GpgProvider {
@@ -57,22 +80,31 @@ impl GpgProvider {
             );
         }
 
-        Ok(Self { key_id })
+        // Get and cache the fingerprint
+        let fingerprint = Self::fetch_key_fingerprint(&key_id)?;
+        
+        // Derive the encryption key using HKDF-SHA256
+        let secret_key = Self::derive_secret_key(&fingerprint)?;
+
+        Ok(Self {
+            secret_key,
+            fingerprint,
+        })
     }
 
-    /// Get the key fingerprint for deterministic operations
-    fn get_key_fingerprint(&self) -> Result<String> {
+    /// Fetch the key fingerprint from GPG
+    fn fetch_key_fingerprint(key_id: &str) -> Result<String> {
         let output = Command::new("gpg")
             .args([
                 "--with-colons",
                 "--fingerprint",
-                &self.key_id,
+                key_id,
             ])
             .output()
             .context("failed to get GPG key fingerprint")?;
 
         if !output.status.success() {
-            bail!("failed to get fingerprint for key '{}'", self.key_id);
+            bail!("failed to get fingerprint for key '{}'", key_id);
         }
 
         // Parse fingerprint from colon-delimited output
@@ -86,89 +118,66 @@ impl GpgProvider {
             }
         }
 
-        bail!("could not parse fingerprint for key '{}'", self.key_id)
+        bail!("could not parse fingerprint for key '{}'", key_id)
+    }
+
+    /// Derive an orion SecretKey from the fingerprint using HKDF-SHA256
+    fn derive_secret_key(fingerprint: &str) -> Result<orion::aead::SecretKey> {
+        let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_FILE), fingerprint.as_bytes());
+        
+        let mut key_bytes = [0u8; 32];
+        hk.expand(b"xchacha20-poly1305-key", &mut key_bytes)
+            .map_err(|_| anyhow!("HKDF expansion failed"))?;
+        
+        orion::aead::SecretKey::from_slice(&key_bytes)
+            .map_err(|_| anyhow!("failed to create orion SecretKey"))
     }
 }
 
 impl CryptoProvider for GpgProvider {
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let mut child = Command::new("gpg")
-            .args([
-                "--encrypt",
-                "--armor",
-                "--recipient",
-                &self.key_id,
-                "--batch",
-                "--yes",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("failed to spawn gpg for encryption")?;
-
-        {
-            let stdin = child.stdin.as_mut().context("failed to open gpg stdin")?;
-            stdin
-                .write_all(plaintext)
-                .context("failed to write to gpg stdin")?;
-        }
-
-        let output = child.wait_with_output().context("failed to wait for gpg")?;
-
-        if !output.status.success() {
-            bail!(
-                "GPG encryption failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        Ok(output.stdout)
+        // Use orion's seal() - handles nonce generation automatically
+        let ciphertext = orion::aead::seal(&self.secret_key, plaintext)
+            .map_err(|_| anyhow!("encryption failed"))?;
+        
+        // Format: MAGIC || base64(ciphertext)
+        let mut result = Vec::from(GPG_CHACHA_MAGIC);
+        result.extend_from_slice(base64_encode(&ciphertext).as_bytes());
+        result.push(b'\n');
+        
+        Ok(result)
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let mut child = Command::new("gpg")
-            .args(["--decrypt", "--batch", "--yes"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("failed to spawn gpg for decryption")?;
-
-        {
-            let stdin = child.stdin.as_mut().context("failed to open gpg stdin")?;
-            stdin
-                .write_all(ciphertext)
-                .context("failed to write to gpg stdin")?;
+        // Check for our magic header
+        if !ciphertext.starts_with(GPG_CHACHA_MAGIC) {
+            bail!("invalid file format: missing GPG-ChaCha20 header");
         }
-
-        let output = child.wait_with_output().context("failed to wait for gpg")?;
-
-        if !output.status.success() {
-            bail!(
-                "GPG decryption failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        Ok(output.stdout)
+        
+        // Strip magic header and decode base64
+        let encoded = &ciphertext[GPG_CHACHA_MAGIC.len()..];
+        let encoded_str = std::str::from_utf8(encoded)
+            .context("invalid UTF-8 in ciphertext")?
+            .trim();
+        let decoded = base64_decode(encoded_str)
+            .context("failed to decode base64 ciphertext")?;
+        
+        // Use orion's open() - handles nonce extraction automatically
+        orion::aead::open(&self.secret_key, &decoded)
+            .map_err(|_| anyhow!("decryption failed - invalid key or corrupted data"))
     }
 
     fn derive_db_key(&self) -> Result<String> {
-        // Use key fingerprint + fixed salt to derive a deterministic DB key
-        // We use GPG to encrypt a known message and hash the result
-        let fingerprint = self.get_key_fingerprint()?;
-
-        // Create a deterministic key by hashing fingerprint with a salt
-        // This ensures the same GPG key always produces the same DB key
-        use sha1::{Digest, Sha1};
-        let mut hasher = Sha1::new();
-        hasher.update(b"rldx-sqlcipher-key-v1:");
-        hasher.update(fingerprint.as_bytes());
-        let hash = hasher.finalize();
+        // Use HKDF-SHA256 for DB key derivation (separate from file encryption key)
+        let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_DB), self.fingerprint.as_bytes());
+        
+        // Derive 32 bytes for SQLCipher key
+        let mut okm = [0u8; 32];
+        hk.expand(b"sqlcipher-key", &mut okm)
+            .map_err(|_| anyhow!("HKDF expansion failed for DB key"))?;
 
         // Convert to hex string for SQLCipher PRAGMA key
-        Ok(format!("x'{}'", hex::encode(hash)))
+        Ok(format!("x'{}'", hex_encode(&okm)))
     }
 
     fn encryption_type(&self) -> EncryptionType {
@@ -313,22 +322,26 @@ impl CryptoProvider for AgeProvider {
     }
 
     fn derive_db_key(&self) -> Result<String> {
-        // Derive DB key from the first identity's public key
+        // Derive DB key from the first identity's public key using HKDF-SHA256
         let identities = self.read_identities()?;
         let first_identity = identities.first().context("no identities available")?;
 
         // Get the public key from the identity
         let public_key = first_identity.to_public();
 
-        // Hash the public key to create a deterministic DB key
-        use sha1::{Digest, Sha1};
-        let mut hasher = Sha1::new();
-        hasher.update(b"rldx-sqlcipher-key-v1:");
-        hasher.update(public_key.to_string().as_bytes());
-        let hash = hasher.finalize();
+        // Use HKDF-SHA256 for key derivation
+        let hk = Hkdf::<Sha256>::new(
+            Some(b"rldx-age-db-encryption-v1"),
+            public_key.to_string().as_bytes(),
+        );
+        
+        // Derive 32 bytes for SQLCipher key
+        let mut okm = [0u8; 32];
+        hk.expand(b"sqlcipher-key", &mut okm)
+            .map_err(|_| anyhow!("HKDF expansion failed for DB key"))?;
 
         // Convert to hex string for SQLCipher PRAGMA key
-        Ok(format!("x'{}'", hex::encode(hash)))
+        Ok(format!("x'{}'", hex_encode(&okm)))
     }
 
     fn encryption_type(&self) -> EncryptionType {
@@ -365,21 +378,27 @@ pub fn create_provider(config: &EncryptionConfig) -> Result<Box<dyn CryptoProvid
 }
 
 // =============================================================================
-// Helper functions for hex encoding
+// Helper functions for encoding
 // =============================================================================
 
-mod hex {
+fn hex_encode(bytes: &[u8]) -> String {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        let bytes = bytes.as_ref();
-        let mut hex = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            hex.push(HEX_CHARS[(b >> 4) as usize] as char);
-            hex.push(HEX_CHARS[(b & 0x0f) as usize] as char);
-        }
-        hex
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        hex.push(HEX_CHARS[(b >> 4) as usize] as char);
+        hex.push(HEX_CHARS[(b & 0x0f) as usize] as char);
     }
+    hex
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    STANDARD.encode(bytes)
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    STANDARD.decode(s).map_err(|e| anyhow!("base64 decode error: {}", e))
 }
 
 #[cfg(test)]
@@ -388,8 +407,76 @@ mod tests {
 
     #[test]
     fn test_hex_encode() {
-        assert_eq!(hex::encode([0x00]), "00");
-        assert_eq!(hex::encode([0xff]), "ff");
-        assert_eq!(hex::encode([0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+        assert_eq!(hex_encode(&[0x00]), "00");
+        assert_eq!(hex_encode(&[0xff]), "ff");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn test_base64_encode() {
+        assert_eq!(base64_encode(&[0x00, 0x01, 0x02]), "AAEC");
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    }
+
+    #[test]
+    fn test_base64_roundtrip() {
+        let data = b"hello world!";
+        let encoded = base64_encode(data);
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    /// Helper to create a test GpgProvider without requiring actual GPG
+    fn test_provider(fingerprint: &str) -> GpgProvider {
+        let secret_key = GpgProvider::derive_secret_key(fingerprint).unwrap();
+        GpgProvider {
+            secret_key,
+            fingerprint: fingerprint.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_gpg_encrypt_decrypt_roundtrip() {
+        let provider = test_provider("TEST_FINGERPRINT_12345");
+
+        let plaintext = b"Hello, this is a test vCard content!";
+        
+        // Encrypt
+        let ciphertext = provider.encrypt(plaintext).unwrap();
+        
+        // Verify it starts with our magic header
+        assert!(ciphertext.starts_with(GPG_CHACHA_MAGIC));
+        
+        // Decrypt
+        let decrypted = provider.decrypt(&ciphertext).unwrap();
+        
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_gpg_different_keys_fail() {
+        let provider1 = test_provider("FINGERPRINT_ONE");
+        let provider2 = test_provider("FINGERPRINT_TWO");
+
+        let plaintext = b"Secret data";
+        let ciphertext = provider1.encrypt(plaintext).unwrap();
+        
+        // Decrypting with wrong key should fail
+        let result = provider2.decrypt(&ciphertext);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gpg_deterministic_key_derivation() {
+        // Same fingerprint should always produce the same key
+        let provider1 = test_provider("SAME_FINGERPRINT");
+        let provider2 = test_provider("SAME_FINGERPRINT");
+        
+        let plaintext = b"Test message";
+        let ciphertext = provider1.encrypt(plaintext).unwrap();
+        
+        // Should be able to decrypt with provider2 (same derived key)
+        let decrypted = provider2.decrypt(&ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
     }
 }

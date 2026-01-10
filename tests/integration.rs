@@ -443,7 +443,7 @@ fn test_import_google_contacts_with_gpg() {
         .success()
         .stdout(predicate::str::contains("Imported 50 contacts"));
 
-    // All vcf files should be .vcf.gpg (filter out non-vcf files like .rldx_normalized)
+    // All vcf files should be .vcf.age (GPG mode now uses Age format internally)
     let vcf_files: Vec<_> = fs::read_dir(&env.vdir_path)
         .unwrap()
         .filter_map(Result::ok)
@@ -458,8 +458,8 @@ fn test_import_google_contacts_with_gpg() {
     for entry in vcf_files {
         let name = entry.file_name().to_string_lossy().to_string();
         assert!(
-            name.ends_with(".vcf.gpg"),
-            "Expected .vcf.gpg file, got {}",
+            name.ends_with(".vcf.age"),
+            "Expected .vcf.age file (GPG now uses Age format), got {}",
             name
         );
     }

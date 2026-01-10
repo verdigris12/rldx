@@ -22,7 +22,7 @@ use tui_widgets::popup::PopupState;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 
-use crate::config::{CommandExec, Config, TopBarAction, UiColors};
+use crate::config::{CommandExec, Config, DetailsSectionsConfig, TopBarAction, UiColors};
 use crate::crypto::CryptoProvider;
 use crate::db::{ContactItem, ContactListEntry, Database, PropRow};
 use crate::indexer;
@@ -35,7 +35,6 @@ use image::{self, DynamicImage};
 
 use super::draw;
 use super::edit::{FieldRef, InlineEditor};
-use super::panes::DetailTab;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneField {
@@ -131,7 +130,8 @@ impl SearchRow {
 pub enum PaneFocus {
     Search,
     Card,
-    Detail(DetailTab),
+    Details,
+    Image,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +196,20 @@ pub struct MultiValueItem {
 pub struct ConfirmModal {
     pub title: String,
     pub message: String,
+    pub action: ConfirmAction,
+}
+
+/// Action to perform when confirm modal is accepted
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// Merge marked contacts
+    MergeContacts,
+    /// Delete the current contact
+    DeleteContact,
+    /// Delete a specific field (field name, seq)
+    DeleteField { field: String, seq: i64 },
+    /// Delete the contact photo
+    DeletePhoto,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +239,12 @@ pub struct ReindexModal {
 pub struct ShareModal {
     /// QR code rendered as lines of Unicode characters
     pub qr_lines: Vec<String>,
+}
+
+/// Photo path input modal
+#[derive(Debug, Clone)]
+pub struct PhotoPathModal {
+    pub input: Input,
 }
 
 impl HelpModal {
@@ -330,6 +350,36 @@ impl MultiValueModal {
     }
 }
 
+/// A field in the details pane with TYPE/NOTE columns
+#[derive(Debug, Clone)]
+pub struct DetailsField {
+    pub label: String,
+    pub value: String,
+    pub copy_value: String,
+    pub types: Vec<String>,     // TYPE parameter values (WORK, HOME, CELL, etc.)
+    pub note: Option<String>,   // NOTE parameter
+    pub source: Option<FieldRef>,
+}
+
+impl DetailsField {
+    /// Convert to PaneField for compatibility with existing code
+    pub fn to_pane_field(&self) -> PaneField {
+        PaneField {
+            label: self.label.clone(),
+            value: self.value.clone(),
+            copy_value: self.copy_value.clone(),
+            source: self.source.clone(),
+        }
+    }
+}
+
+/// A section in the details pane with its fields
+#[derive(Debug, Clone)]
+pub struct DetailsSection {
+    pub name: String,
+    pub fields: Vec<DetailsField>,
+}
+
 pub struct App<'a> {
     db: &'a mut Database,
     config: &'a Config,
@@ -341,16 +391,19 @@ pub struct App<'a> {
     pub search_focus: SearchFocus,
     pub current_contact: Option<ContactItem>,
     pub current_props: Vec<PropRow>,
-    pub tab: DetailTab,
     pub editor: InlineEditor,
     pub status: Option<String>,
     pub aliases: Vec<String>,
     pub languages: Vec<String>,
     pub focused_pane: PaneFocus,
+    // Card pane (panel 1)
     pub card_fields: Vec<PaneField>,
     pub card_field_index: usize,
-    pub tab_fields: [Vec<PaneField>; DetailTab::COUNT],
-    pub tab_field_indices: [usize; DetailTab::COUNT],
+    // Details pane (panel 2) - sections with fields
+    pub details_sections: Vec<DetailsSection>,
+    pub details_field_index: usize,
+    pub details_scroll: usize,
+    // Search results
     pub search_rows: Vec<SearchRow>,
     pub selected_row: Option<usize>,
     // Marked contacts by UUID
@@ -374,8 +427,105 @@ pub struct App<'a> {
     pub reindex_modal: Option<ReindexModal>,
     // Share modal with QR code
     pub share_modal: Option<ShareModal>,
+    // Add field modal (multi-step wizard)
+    pub add_field_modal: Option<AddFieldModal>,
+    // Photo path input modal
+    pub photo_path_modal: Option<PhotoPathModal>,
     // Flag to trigger reindex from event loop
     pub pending_reindex: bool,
+}
+
+/// Add field modal - multi-step wizard for adding new fields
+#[derive(Debug, Clone)]
+pub struct AddFieldModal {
+    pub state: AddFieldState,
+    pub property_index: usize,
+    pub type_index: Option<usize>,
+    pub value_input: Input,
+    pub custom_property_input: Input,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddFieldState {
+    SelectProperty,
+    SelectType,
+    EnterValue,
+    EnterCustomProperty,
+}
+
+/// Standard vCard properties that can be added
+pub const STANDARD_PROPERTIES: &[(&str, &str, bool)] = &[
+    // (display name, vcard field, supports_type)
+    ("Phone", "TEL", true),
+    ("Email", "EMAIL", true),
+    ("Address", "ADR", true),
+    ("URL", "URL", true),
+    ("Note", "NOTE", false),
+    ("Birthday", "BDAY", false),
+    ("Organization", "ORG", false),
+    ("Title", "TITLE", false),
+    ("Role", "ROLE", false),
+    ("Nickname", "NICKNAME", false),
+    ("IMPP", "IMPP", true),
+    ("Custom (X-...)", "X-", true),
+];
+
+/// Standard TYPE values for fields that support them
+pub const TYPE_VALUES: &[&str] = &[
+    "work", "home", "cell", "voice", "fax", "pager", "text", "video",
+];
+
+impl AddFieldModal {
+    pub fn new() -> Self {
+        Self {
+            state: AddFieldState::SelectProperty,
+            property_index: 0,
+            type_index: None,
+            value_input: Input::default(),
+            custom_property_input: Input::default(),
+        }
+    }
+
+    pub fn current_property(&self) -> Option<(&str, &str, bool)> {
+        STANDARD_PROPERTIES.get(self.property_index).copied()
+    }
+
+    pub fn current_type(&self) -> Option<&str> {
+        self.type_index.and_then(|i| TYPE_VALUES.get(i).copied())
+    }
+
+    pub fn select_next_property(&mut self) {
+        self.property_index = (self.property_index + 1) % STANDARD_PROPERTIES.len();
+    }
+
+    pub fn select_prev_property(&mut self) {
+        if self.property_index == 0 {
+            self.property_index = STANDARD_PROPERTIES.len() - 1;
+        } else {
+            self.property_index -= 1;
+        }
+    }
+
+    pub fn select_next_type(&mut self) {
+        match self.type_index {
+            None => self.type_index = Some(0),
+            Some(i) => self.type_index = Some((i + 1) % TYPE_VALUES.len()),
+        }
+    }
+
+    pub fn select_prev_type(&mut self) {
+        match self.type_index {
+            None => self.type_index = Some(TYPE_VALUES.len() - 1),
+            Some(0) => self.type_index = Some(TYPE_VALUES.len() - 1),
+            Some(i) => self.type_index = Some(i - 1),
+        }
+    }
+}
+
+impl Default for AddFieldModal {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a> App<'a> {
@@ -392,7 +542,6 @@ impl<'a> App<'a> {
             search_focus: SearchFocus::Input,
             current_contact: None,
             current_props: Vec::new(),
-            tab: DetailTab::Work,
             editor: InlineEditor::default(),
             status: None,
             aliases: Vec::new(),
@@ -400,8 +549,9 @@ impl<'a> App<'a> {
             focused_pane: PaneFocus::Search,
             card_fields: Vec::new(),
             card_field_index: 0,
-            tab_fields: Default::default(),
-            tab_field_indices: [0; DetailTab::COUNT],
+            details_sections: Vec::new(),
+            details_field_index: 0,
+            details_scroll: 0,
             search_rows: Vec::new(),
             selected_row: None,
             marked: HashSet::new(),
@@ -417,6 +567,8 @@ impl<'a> App<'a> {
             help_modal: None,
             reindex_modal: None,
             share_modal: None,
+            add_field_modal: None,
+            photo_path_modal: None,
             pending_reindex: false,
         };
         app.rebuild_search_rows();
@@ -523,6 +675,16 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
+        if self.add_field_modal.is_some() {
+            self.handle_add_field_modal_key(key)?;
+            return Ok(false);
+        }
+
+        if self.photo_path_modal.is_some() {
+            self.handle_photo_path_modal_key(key)?;
+            return Ok(false);
+        }
+
         if self.multivalue_modal.is_some() {
             self.handle_multivalue_modal_key(key)?;
             return Ok(false);
@@ -577,16 +739,6 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        // Navigation: tab next/prev (switch between panes)
-        if self.key_matches_any(&key, &nav.tab_next) {
-            self.advance_tab(1);
-            return Ok(false);
-        }
-        if self.key_matches_any(&key, &nav.tab_prev) {
-            self.advance_tab(-1);
-            return Ok(false);
-        }
-
         // Navigation: edit
         if self.key_matches_any(&key, &nav.edit) {
             self.begin_edit();
@@ -599,21 +751,82 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        // Navigation: add alias (only when ALIAS field is focused)
-        if self.key_matches_any(&key, &nav.add_alias) {
+        // Navigation: add field
+        if self.key_matches_any(&key, &nav.add_field) {
+            // For ALIAS in Card pane, use existing add alias modal
             if let Some(field) = self.focused_field() {
-                if field.label.eq_ignore_ascii_case("ALIAS") {
+                let label_upper = field.label.to_uppercase();
+                if label_upper == "ALIAS" || label_upper.starts_with("ALIAS") {
                     self.modal_popup = PopupState::default();
                     self.alias_modal = Some(AliasModal { input: Input::default() });
                     self.set_status("Add alias");
                     return Ok(false);
                 }
             }
+            // For all other fields (or no field focused), open the generic add field modal
+            if self.current_contact.is_some() {
+                self.modal_popup = PopupState::default();
+                self.add_field_modal = Some(AddFieldModal::new());
+                self.set_status("Add field");
+            } else {
+                self.set_status("No contact selected");
+            }
+            return Ok(false);
         }
 
-        // Navigation: photo fetch
+        // Navigation: delete field
+        if self.key_matches_any(&key, &nav.delete_field) {
+            if let Some(field) = self.focused_field() {
+                if let Some(source) = field.source() {
+                    // Show confirmation modal
+                    self.modal_popup = PopupState::default();
+                    self.confirm_modal = Some(ConfirmModal {
+                        title: "DELETE FIELD".to_string(),
+                        message: format!("Delete {} \"{}\"?", field.label, truncate_value(&field.value, 30)),
+                        action: ConfirmAction::DeleteField {
+                            field: source.field,
+                            seq: source.seq,
+                        },
+                    });
+                } else {
+                    self.set_status("Field not deletable");
+                }
+            } else {
+                self.set_status("No field selected");
+            }
+            return Ok(false);
+        }
+
+        // Navigation: photo fetch (only when Image pane is focused)
         if self.key_matches_any(&key, &nav.photo_fetch) {
-            self.set_status("Image fetch is not yet implemented");
+            if matches!(self.focused_pane, PaneFocus::Image) {
+                if self.current_contact.is_some() {
+                    self.modal_popup = PopupState::default();
+                    self.photo_path_modal = Some(PhotoPathModal { input: Input::default() });
+                    self.set_status("Enter path to image");
+                } else {
+                    self.set_status("No contact selected");
+                }
+            } else {
+                self.set_status("Focus Image pane (press 3) to add photo");
+            }
+            return Ok(false);
+        }
+
+        // Navigation: delete photo (only when Image pane is focused, use delete_field key)
+        if matches!(self.focused_pane, PaneFocus::Image) && self.key_matches_any(&key, &nav.delete_field) {
+            if self.current_contact.is_some() && self.photo_data.is_some() {
+                self.modal_popup = PopupState::default();
+                self.confirm_modal = Some(ConfirmModal {
+                    title: "DELETE PHOTO".to_string(),
+                    message: "Delete the contact photo?".to_string(),
+                    action: ConfirmAction::DeletePhoto,
+                });
+            } else if self.photo_data.is_none() {
+                self.set_status("No photo to delete");
+            } else {
+                self.set_status("No contact selected");
+            }
             return Ok(false);
         }
 
@@ -623,45 +836,17 @@ impl<'a> App<'a> {
             return Ok(false);
         }
 
-        // Digit shortcuts for pane focus (1-5)
-        if let KeyCode::Char(c) = key.code {
-            if self.focus_by_digit(c) {
-                return Ok(false);
+        // Digit shortcuts for pane focus (1-3) - only when search is closed
+        if !self.show_search {
+            if let KeyCode::Char(c) = key.code {
+                if self.focus_by_digit(c) {
+                    return Ok(false);
+                }
             }
         }
 
         Ok(false)
     }
-
-    /// Advance to next/previous tab (pane)
-    fn advance_tab(&mut self, delta: isize) {
-        match self.focused_pane {
-            PaneFocus::Search => {
-                // From search, go to card
-                self.focus_pane(PaneFocus::Card);
-            }
-            PaneFocus::Card => {
-                if delta > 0 {
-                    self.focus_pane(PaneFocus::Detail(DetailTab::Work));
-                } else {
-                    // Wrap to last tab
-                    self.focus_pane(PaneFocus::Detail(DetailTab::Metadata));
-                }
-            }
-            PaneFocus::Detail(tab) => {
-                let next_tab = if delta > 0 {
-                    tab.next()
-                } else {
-                    tab.prev()
-                };
-                match next_tab {
-                    Some(t) => self.focus_pane(PaneFocus::Detail(t)),
-                    None => self.focus_pane(PaneFocus::Card),
-                }
-            }
-        }
-    }
-
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<bool> {
         match self.search_focus {
             SearchFocus::Input => {
@@ -776,6 +961,7 @@ impl<'a> App<'a> {
                             "Merge {} marked contacts into a single card?",
                             count
                         ),
+                        action: ConfirmAction::MergeContacts,
                     });
                     return Ok(true);
                 }
@@ -914,6 +1100,238 @@ impl<'a> App<'a> {
         self.show_marked_only = false;
         self.refresh_contacts()?;
         self.set_status("Merged contacts");
+        Ok(())
+    }
+
+    /// Delete the current contact file
+    fn delete_current_contact(&mut self) -> Result<()> {
+        let Some(contact) = self.current_contact.take() else {
+            self.set_status("No contact selected");
+            return Ok(());
+        };
+
+        // Remove from database first
+        self.db.delete_items_by_paths(std::iter::once(contact.path.clone()))?;
+
+        // Delete the file
+        if contact.path.exists() {
+            std::fs::remove_file(&contact.path)
+                .with_context(|| format!("failed to delete {}", contact.path.display()))?;
+        }
+
+        // Refresh contacts list
+        self.refresh_contacts()?;
+        self.set_status("Contact deleted");
+        Ok(())
+    }
+
+    /// Delete a specific field from the current contact
+    fn delete_field(&mut self, field: &str, seq: i64) -> Result<()> {
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(());
+        };
+
+        let seq_usize = match usize::try_from(seq) {
+            Ok(s) => s,
+            Err(_) => {
+                self.set_status("Invalid field index");
+                return Ok(());
+            }
+        };
+
+        // Parse the vCard file
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() {
+            self.set_status("Contact has no cards");
+            return Ok(());
+        }
+
+        // Delete the field
+        let deleted = {
+            let card = cards.get_mut(0).unwrap();
+            vcard_io::delete_card_field(card, field, seq_usize)
+        };
+
+        if !deleted {
+            self.set_status("Failed to delete field");
+            return Ok(());
+        }
+
+        // Write back
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
+
+        // Update database
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        // Refresh UI
+        self.refresh_contacts()?;
+        self.set_status("Field deleted");
+        Ok(())
+    }
+
+    /// Delete the photo from the current contact
+    fn delete_contact_photo(&mut self) -> Result<()> {
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(());
+        };
+
+        // Parse the vCard file
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() {
+            self.set_status("Contact has no cards");
+            return Ok(());
+        }
+
+        // Delete the photo
+        {
+            let card = cards.get_mut(0).unwrap();
+            vcard_io::delete_photo(card);
+        }
+
+        // Write back
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
+
+        // Update database
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        // Refresh UI
+        self.refresh_contacts()?;
+        self.set_status("Photo deleted");
+        Ok(())
+    }
+
+    /// Handle keys for photo path modal
+    fn handle_photo_path_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        let modal_keys = &self.config.keys.modal;
+
+        // Cancel: close modal
+        if self.key_matches_any(&key, &modal_keys.cancel) {
+            self.photo_path_modal = None;
+            return Ok(());
+        }
+
+        // Confirm: load and set the photo
+        if self.key_matches_any(&key, &modal_keys.confirm) {
+            let path = self.photo_path_modal
+                .as_ref()
+                .map(|m| m.input.value().trim().to_string())
+                .unwrap_or_default();
+            self.photo_path_modal = None;
+
+            if path.is_empty() {
+                self.set_status("No path entered");
+                return Ok(());
+            }
+
+            // Expand ~ to home directory
+            let expanded_path = if path.starts_with("~/") {
+                if let Some(home) = home::home_dir() {
+                    home.join(&path[2..])
+                } else {
+                    std::path::PathBuf::from(&path)
+                }
+            } else {
+                std::path::PathBuf::from(&path)
+            };
+
+            self.set_contact_photo_from_path(&expanded_path)?;
+            return Ok(());
+        }
+
+        // Route other keys to input
+        if let Some(modal) = self.photo_path_modal.as_mut() {
+            let _ = modal.input.handle_event(&Event::Key(key));
+        }
+        Ok(())
+    }
+
+    /// Load image from path, resize to max 128x128, and set as contact photo
+    fn set_contact_photo_from_path(&mut self, path: &Path) -> Result<()> {
+        use base64::Engine;
+        use image::GenericImageView;
+        use image::imageops::FilterType;
+
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(());
+        };
+
+        // Check if file exists
+        if !path.exists() {
+            self.set_status(format!("File not found: {}", path.display()));
+            return Ok(());
+        }
+
+        // Load the image
+        let img = match image::open(path) {
+            Ok(img) => img,
+            Err(e) => {
+                self.set_status(format!("Failed to load image: {}", e));
+                return Ok(());
+            }
+        };
+
+        // Resize to max 128x128 preserving aspect ratio
+        let (width, height) = img.dimensions();
+        let max_dim = 128u32;
+        let (new_width, new_height) = if width > max_dim || height > max_dim {
+            let ratio = f64::min(max_dim as f64 / width as f64, max_dim as f64 / height as f64);
+            let new_w = (width as f64 * ratio).round() as u32;
+            let new_h = (height as f64 * ratio).round() as u32;
+            (new_w.max(1), new_h.max(1))
+        } else {
+            (width, height)
+        };
+
+        let resized = img.resize_exact(new_width, new_height, FilterType::Lanczos3);
+
+        // Encode as JPEG
+        let mut jpeg_data = Vec::new();
+        {
+            let mut cursor = std::io::Cursor::new(&mut jpeg_data);
+            resized.write_to(&mut cursor, image::ImageFormat::Jpeg)
+                .with_context(|| "failed to encode image as JPEG")?;
+        }
+
+        // Create data URI
+        let base64_data = BASE64_STANDARD.encode(&jpeg_data);
+        let data_uri = format!("data:image/jpeg;base64,{}", base64_data);
+
+        // Parse and update the vCard
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() {
+            self.set_status("Contact has no cards");
+            return Ok(());
+        }
+
+        {
+            let card = cards.get_mut(0).unwrap();
+            vcard_io::set_photo(card, &data_uri);
+        }
+
+        // Write back
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
+
+        // Update database
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        // Refresh UI
+        self.refresh_contacts()?;
+        self.set_status("Photo updated");
         Ok(())
     }
 
@@ -1122,32 +1540,250 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn handle_confirm_modal_key(&mut self, key: KeyEvent) -> Result<()> {
-        if self.confirm_modal.is_none() {
+    fn handle_add_field_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        let modal_keys = &self.config.keys.modal;
+
+        // Cancel: close modal or go back
+        if self.key_matches_any(&key, &modal_keys.cancel) {
+            if let Some(modal) = &self.add_field_modal {
+                match modal.state {
+                    AddFieldState::SelectProperty => {
+                        // Close modal entirely
+                        self.add_field_modal = None;
+                    }
+                    AddFieldState::SelectType | AddFieldState::EnterCustomProperty => {
+                        // Go back to property selection
+                        if let Some(m) = self.add_field_modal.as_mut() {
+                            m.state = AddFieldState::SelectProperty;
+                        }
+                    }
+                    AddFieldState::EnterValue => {
+                        // Go back to type selection or property selection
+                        if let Some(m) = self.add_field_modal.as_mut() {
+                            if let Some((_, _, supports_type)) = m.current_property() {
+                                if supports_type {
+                                    m.state = AddFieldState::SelectType;
+                                } else {
+                                    m.state = AddFieldState::SelectProperty;
+                                }
+                            } else {
+                                m.state = AddFieldState::SelectProperty;
+                            }
+                        }
+                    }
+                }
+            }
             return Ok(());
         }
+
+        // Get current state
+        let state = self.add_field_modal.as_ref().map(|m| m.state);
+        let Some(state) = state else { return Ok(()); };
+
+        match state {
+            AddFieldState::SelectProperty => {
+                // Next/prev property
+                if self.key_matches_any(&key, &modal_keys.next) {
+                    if let Some(modal) = self.add_field_modal.as_mut() {
+                        modal.select_next_property();
+                    }
+                    return Ok(());
+                }
+                if self.key_matches_any(&key, &modal_keys.prev) {
+                    if let Some(modal) = self.add_field_modal.as_mut() {
+                        modal.select_prev_property();
+                    }
+                    return Ok(());
+                }
+
+                // Confirm: move to next step
+                if self.key_matches_any(&key, &modal_keys.confirm) {
+                    if let Some(modal) = self.add_field_modal.as_mut() {
+                        if let Some((_, vcard_field, supports_type)) = modal.current_property() {
+                            if vcard_field == "X-" {
+                                // Custom property: need to enter property name
+                                modal.state = AddFieldState::EnterCustomProperty;
+                            } else if supports_type {
+                                // Has type parameter: go to type selection
+                                modal.state = AddFieldState::SelectType;
+                            } else {
+                                // No type: go straight to value entry
+                                modal.state = AddFieldState::EnterValue;
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            AddFieldState::SelectType => {
+                // Next/prev type
+                if self.key_matches_any(&key, &modal_keys.next) {
+                    if let Some(modal) = self.add_field_modal.as_mut() {
+                        modal.select_next_type();
+                    }
+                    return Ok(());
+                }
+                if self.key_matches_any(&key, &modal_keys.prev) {
+                    if let Some(modal) = self.add_field_modal.as_mut() {
+                        modal.select_prev_type();
+                    }
+                    return Ok(());
+                }
+
+                // Confirm: move to value entry
+                if self.key_matches_any(&key, &modal_keys.confirm) {
+                    if let Some(modal) = self.add_field_modal.as_mut() {
+                        modal.state = AddFieldState::EnterValue;
+                    }
+                    return Ok(());
+                }
+            }
+            AddFieldState::EnterCustomProperty => {
+                // Confirm: move to type selection (or value if no type support)
+                if self.key_matches_any(&key, &modal_keys.confirm) {
+                    if let Some(modal) = self.add_field_modal.as_mut() {
+                        let custom_name = modal.custom_property_input.value().trim().to_string();
+                        if custom_name.is_empty() {
+                            self.set_status("Property name required");
+                            return Ok(());
+                        }
+                        // Custom X- fields support types
+                        modal.state = AddFieldState::SelectType;
+                    }
+                    return Ok(());
+                }
+
+                // Route other keys to input
+                if let Some(modal) = self.add_field_modal.as_mut() {
+                    let _ = modal.custom_property_input.handle_event(&Event::Key(key));
+                }
+            }
+            AddFieldState::EnterValue => {
+                // Confirm: add the field
+                if self.key_matches_any(&key, &modal_keys.confirm) {
+                    self.commit_add_field()?;
+                    return Ok(());
+                }
+
+                // Route other keys to input
+                if let Some(modal) = self.add_field_modal.as_mut() {
+                    let _ = modal.value_input.handle_event(&Event::Key(key));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Commit the new field from add_field_modal to the current contact
+    fn commit_add_field(&mut self) -> Result<()> {
+        let Some(modal) = self.add_field_modal.take() else {
+            return Ok(());
+        };
+
+        let value = modal.value_input.value().trim().to_string();
+        if value.is_empty() {
+            self.set_status("Value required");
+            return Ok(());
+        }
+
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(());
+        };
+
+        // Determine field name
+        let field_name = if let Some((_, vcard_field, _)) = modal.current_property() {
+            if vcard_field == "X-" {
+                // Custom property
+                let custom = modal.custom_property_input.value().trim().to_uppercase();
+                if custom.starts_with("X-") {
+                    custom
+                } else {
+                    format!("X-{}", custom)
+                }
+            } else {
+                vcard_field.to_string()
+            }
+        } else {
+            self.set_status("No property selected");
+            return Ok(());
+        };
+
+        // Get type parameter if selected
+        let type_param = modal.current_type().map(|s| s.to_string());
+
+        // Parse and update the vCard
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref(), self.provider)?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() {
+            self.set_status("Contact has no cards");
+            return Ok(());
+        }
+
+        {
+            let card = cards.get_mut(0).unwrap();
+            let added = vcard_io::add_card_field(card, &field_name, &value, type_param.as_deref());
+            if !added {
+                self.set_status("Failed to add field");
+                return Ok(());
+            }
+        }
+
+        // Write back
+        vcard_io::write_cards(&contact.path, &cards, self.provider)?;
+
+        // Update database
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        // Refresh UI
+        self.refresh_contacts()?;
+        self.set_status(format!("{} added", field_name));
+
+        Ok(())
+    }
+
+    fn handle_confirm_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(modal) = self.confirm_modal.take() else {
+            return Ok(());
+        };
 
         let modal_keys = &self.config.keys.modal;
 
         // Cancel: close modal without action
         if self.key_matches_any(&key, &modal_keys.cancel) {
-            self.confirm_modal = None;
             return Ok(());
         }
 
         // Also accept 'n' as cancel (common convention)
         if matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'n')) {
-            self.confirm_modal = None;
             return Ok(());
         }
 
-        // Confirm: execute action (merge)
+        // Confirm: execute action based on modal type
         if self.key_matches_any(&key, &modal_keys.confirm) {
-            self.confirm_modal = None;
-            self.merge_marked_contacts()?;
+            match modal.action {
+                ConfirmAction::MergeContacts => {
+                    self.merge_marked_contacts()?;
+                }
+                ConfirmAction::DeleteContact => {
+                    self.delete_current_contact()?;
+                }
+                ConfirmAction::DeleteField { field, seq } => {
+                    self.delete_field(&field, seq)?;
+                }
+                ConfirmAction::DeletePhoto => {
+                    self.delete_contact_photo()?;
+                }
+            }
             return Ok(());
         }
 
+        // Put the modal back if key wasn't handled
+        self.confirm_modal = Some(modal);
         Ok(())
     }
 
@@ -1475,27 +2111,27 @@ impl<'a> App<'a> {
             self.card_field_index = 0;
         }
 
-        for tab in DetailTab::ALL {
-            let idx = tab.index();
-            if self.current_contact.is_some() {
-                self.tab_fields[idx] = build_tab_fields(tab, &self.current_props, default_region);
-            } else {
-                self.tab_fields[idx].clear();
-            }
+        // Build details sections from config
+        if self.current_contact.is_some() {
+            self.details_sections = build_details_sections(
+                &self.current_props,
+                &self.config.details_sections,
+                default_region,
+            );
+        } else {
+            self.details_sections.clear();
+        }
 
-            if self.tab_fields[idx].is_empty() {
-                self.tab_field_indices[idx] = 0;
-            } else if self.tab_field_indices[idx] >= self.tab_fields[idx].len() {
-                self.tab_field_indices[idx] = 0;
-            }
+        let total_details = self.details_total_fields();
+        if total_details == 0 {
+            self.details_field_index = 0;
+        } else if self.details_field_index >= total_details {
+            self.details_field_index = 0;
         }
     }
 
     fn focus_pane(&mut self, pane: PaneFocus) {
         self.focused_pane = pane;
-        if let PaneFocus::Detail(tab) = pane {
-            self.tab = tab;
-        }
         if !matches!(pane, PaneFocus::Search) {
             self.show_search = false;
         }
@@ -1511,16 +2147,33 @@ impl<'a> App<'a> {
                     self.card_field_index = 0;
                 }
             }
-            PaneFocus::Detail(tab) => {
-                let idx = tab.index();
-                if self.tab_fields[idx].is_empty() {
-                    self.tab_field_indices[idx] = 0;
-                } else if self.tab_field_indices[idx] >= self.tab_fields[idx].len() {
-                    self.tab_field_indices[idx] = 0;
+            PaneFocus::Details => {
+                let total = self.details_total_fields();
+                if total == 0 {
+                    self.details_field_index = 0;
+                } else if self.details_field_index >= total {
+                    self.details_field_index = 0;
                 }
             }
-            PaneFocus::Search => {}
+            PaneFocus::Image | PaneFocus::Search => {}
         }
+    }
+
+    /// Get total number of fields across all details sections
+    fn details_total_fields(&self) -> usize {
+        self.details_sections.iter().map(|s| s.fields.len()).sum()
+    }
+
+    /// Get a field from details by flat index
+    fn details_field_at(&self, index: usize) -> Option<&DetailsField> {
+        let mut offset = 0;
+        for section in &self.details_sections {
+            if index < offset + section.fields.len() {
+                return section.fields.get(index - offset);
+            }
+            offset += section.fields.len();
+        }
+        None
     }
 
     fn advance_field(&mut self, delta: isize) {
@@ -1534,31 +2187,28 @@ impl<'a> App<'a> {
                 let next = (current + delta).rem_euclid(len);
                 self.card_field_index = next as usize;
             }
-            PaneFocus::Detail(tab) => {
-                let idx = tab.index();
-                let fields = &self.tab_fields[idx];
-                if fields.is_empty() {
+            PaneFocus::Details => {
+                let total = self.details_total_fields();
+                if total == 0 {
                     return;
                 }
-                let len = fields.len() as isize;
-                let current = self.tab_field_indices[idx] as isize;
+                let len = total as isize;
+                let current = self.details_field_index as isize;
                 let next = (current + delta).rem_euclid(len);
-                self.tab_field_indices[idx] = next as usize;
+                self.details_field_index = next as usize;
             }
-            PaneFocus::Search => {}
+            PaneFocus::Image | PaneFocus::Search => {}
         }
     }
 
     fn focused_field(&self) -> Option<PaneField> {
         match self.focused_pane {
             PaneFocus::Card => self.card_fields.get(self.card_field_index).cloned(),
-            PaneFocus::Detail(tab) => {
-                let idx = tab.index();
-                self.tab_fields[idx]
-                    .get(self.tab_field_indices[idx])
-                    .cloned()
+            PaneFocus::Details => {
+                self.details_field_at(self.details_field_index)
+                    .map(|df| df.to_pane_field())
             }
-            PaneFocus::Search => None,
+            PaneFocus::Image | PaneFocus::Search => None,
         }
     }
 
@@ -1943,14 +2593,15 @@ impl<'a> App<'a> {
                 self.focus_pane(PaneFocus::Card);
                 true
             }
-            c => {
-                if let Some(tab) = DetailTab::from_digit(c) {
-                    self.focus_pane(PaneFocus::Detail(tab));
-                    true
-                } else {
-                    false
-                }
+            '2' => {
+                self.focus_pane(PaneFocus::Details);
+                true
             }
+            '3' => {
+                self.focus_pane(PaneFocus::Image);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -2046,20 +2697,12 @@ impl<'a> App<'a> {
                 title: "Navigation",
                 entries: vec![
                     HelpEntry {
-                        action: "Next",
+                        action: "Next Field",
                         keys: keys.navigation.next.join(", "),
                     },
                     HelpEntry {
-                        action: "Previous",
+                        action: "Previous Field",
                         keys: keys.navigation.prev.join(", "),
-                    },
-                    HelpEntry {
-                        action: "Tab Next",
-                        keys: keys.navigation.tab_next.join(", "),
-                    },
-                    HelpEntry {
-                        action: "Tab Previous",
-                        keys: keys.navigation.tab_prev.join(", "),
                     },
                     HelpEntry {
                         action: "Edit",
@@ -2074,8 +2717,12 @@ impl<'a> App<'a> {
                         keys: keys.navigation.confirm.join(", "),
                     },
                     HelpEntry {
-                        action: "Add Alias",
-                        keys: keys.navigation.add_alias.join(", "),
+                        action: "Add Field",
+                        keys: keys.navigation.add_field.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Delete Field",
+                        keys: keys.navigation.delete_field.join(", "),
                     },
                     HelpEntry {
                         action: "Fetch Photo",
@@ -2245,8 +2892,16 @@ impl<'a> App<'a> {
                 self.show_help();
                 Ok(false)
             }
-            TopBarAction::Edit => {
-                // No-op for now - will implement full editor later
+            TopBarAction::Sync => {
+                // Check if any remotes are configured
+                if self.config.remotes.is_empty() {
+                    self.set_status("No remotes configured (use CLI: rldx sync)");
+                } else {
+                    let remote_names: Vec<&str> = self.config.remotes.iter()
+                        .map(|r| r.name.as_str())
+                        .collect();
+                    self.set_status(format!("Sync from CLI: rldx sync ({})", remote_names.join(", ")));
+                }
                 Ok(false)
             }
             TopBarAction::Refresh => {
@@ -2256,6 +2911,20 @@ impl<'a> App<'a> {
             }
             TopBarAction::Share => {
                 self.show_share_modal()?;
+                Ok(false)
+            }
+            TopBarAction::Delete => {
+                // Delete current contact with confirmation
+                if let Some(contact) = &self.current_contact {
+                    self.modal_popup = PopupState::default();
+                    self.confirm_modal = Some(ConfirmModal {
+                        title: "DELETE CONTACT".to_string(),
+                        message: format!("Delete {}?", contact.display_fn),
+                        action: ConfirmAction::DeleteContact,
+                    });
+                } else {
+                    self.set_status("No contact selected");
+                }
                 Ok(false)
             }
         }
@@ -2821,199 +3490,170 @@ fn props_is_org(props: &[PropRow]) -> bool {
         && (p.value.eq_ignore_ascii_case("org") || p.value.eq_ignore_ascii_case("organization")))
 }
 
-fn build_tab_fields(
-    tab: DetailTab,
+/// Build details sections from config, matching props to configured sections
+fn build_details_sections(
     props: &[PropRow],
+    config: &DetailsSectionsConfig,
     default_region: Option<&str>,
-) -> Vec<PaneField> {
-    match tab {
-        DetailTab::Work => build_work_fields(props, default_region),
-        DetailTab::Personal => build_personal_fields(props, default_region),
-        DetailTab::Accounts => build_account_fields(props),
-        DetailTab::Metadata => build_metadata_fields(props),
-    }
-}
-
-fn build_work_fields(props: &[PropRow], default_region: Option<&str>) -> Vec<PaneField> {
-    let mut fields = Vec::new();
-
-    for prop in props.iter().filter(|p| p.field == "ORG") {
-        fields.push(PaneField::new("ORG", prop.value.clone()));
-    }
-    for prop in props.iter().filter(|p| p.field == "TITLE") {
-        fields.push(PaneField::new("TITLE", prop.value.clone()));
-    }
-    for prop in props.iter().filter(|p| p.field == "ROLE") {
-        fields.push(PaneField::new("ROLE", prop.value.clone()));
-    }
-
-    for prop in props.iter().filter(|p| p.field == "ADR") {
-        if prop_has_type(&prop.params, "work") {
-            let label = format_label_with_type("ADDRESS", &prop.params);
-            fields.push(PaneField::new(label, format_address_value(prop)));
-        }
-    }
-
-    for prop in props.iter().filter(|p| p.field == "EMAIL") {
-        if prop_has_type(&prop.params, "work") {
-            let label = format_label_with_type("EMAIL", &prop.params);
-            let base = prop.value.trim().to_string();
-            let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(
-                label, display, base, "EMAIL", prop.seq, None,
-            ));
-        }
-    }
-
-    for prop in props.iter().filter(|p| p.field == "TEL") {
-        if prop_has_type(&prop.params, "work") {
-            let label = format_label_with_type("PHONE", &prop.params);
-            let base = vcard_io::phone_display_value(&prop.value, default_region);
-            let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(
-                label, display, base, "TEL", prop.seq, None,
-            ));
-        }
-    }
-
-    fields
-}
-
-fn build_personal_fields(props: &[PropRow], default_region: Option<&str>) -> Vec<PaneField> {
-    let mut fields = Vec::new();
-
-    for prop in props.iter().filter(|p| p.field == "BDAY") {
-        fields.push(PaneField::new("BDAY", prop.value.clone()));
-    }
-    for prop in props.iter().filter(|p| p.field == "ANNIVERSARY") {
-        fields.push(PaneField::new("ANNIVERSARY", prop.value.clone()));
-    }
-
-    for prop in props.iter().filter(|p| p.field == "ADR") {
-        if prop_has_type(&prop.params, "home") {
-            let label = format_label_with_type("ADDRESS", &prop.params);
-            fields.push(PaneField::new(label, format_address_value(prop)));
-        }
-    }
-
-    for prop in props.iter().filter(|p| p.field == "EMAIL") {
-        if prop_has_type(&prop.params, "home") {
-            let label = format_label_with_type("EMAIL", &prop.params);
-            let base = prop.value.trim().to_string();
-            let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(
-                label, display, base, "EMAIL", prop.seq, None,
-            ));
-        }
-    }
-
-    for prop in props.iter().filter(|p| p.field == "TEL") {
-        if prop_has_type(&prop.params, "home") {
-            let label = format_label_with_type("PHONE", &prop.params);
-            let base = vcard_io::phone_display_value(&prop.value, default_region);
-            let display = format_with_index(&base, prop.seq);
-            fields.push(PaneField::from_prop(
-                label, display, base, "TEL", prop.seq, None,
-            ));
-        }
-    }
-
-    fields
-}
-
-fn build_account_fields(props: &[PropRow]) -> Vec<PaneField> {
-    let mut fields = Vec::new();
-
-    for prop in props.iter().filter(|p| p.field == "IMPP") {
-        let label = format_label_with_type("IMPP", &prop.params);
-        fields.push(PaneField::new(label, prop.value.clone()));
-    }
-    for prop in props.iter().filter(|p| p.field == "URL") {
-        let label = format_label_with_type("URL", &prop.params);
-        fields.push(PaneField::new(label, prop.value.clone()));
-    }
-    for prop in props.iter().filter(|p| p.field == "RELATED") {
-        let label = format_label_with_type("RELATED", &prop.params);
-        fields.push(PaneField::new(label, prop.value.clone()));
-    }
-
-    // Include recognizable social handles (X-*)
-    for prop in props.iter().filter(|p| {
-        p.field.starts_with("X-") && (p.field.contains("SOCIAL") || p.field.contains("IM"))
-    }) {
-        let label = prop.field.to_uppercase();
-        fields.push(PaneField::new(label, prop.value.clone()));
-    }
-
-    fields
-}
-
-fn build_metadata_fields(props: &[PropRow]) -> Vec<PaneField> {
-    let mut fields = Vec::new();
-    for prop in props {
-        let value = if params_is_empty(&prop.params) {
-            prop.value.clone()
-        } else {
-            format!("{} ({})", prop.value, format_params(&prop.params))
-        };
-        fields.push(PaneField::new(prop.field.clone(), value));
-    }
-    fields
-}
-
-fn params_is_empty(params: &Value) -> bool {
-    matches!(params, Value::Object(map) if map.is_empty())
-}
-
-fn format_params(params: &Value) -> String {
-    serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string())
-}
-
-fn format_label_with_type(base: &str, params: &Value) -> String {
-    let upper = base.to_uppercase();
-    if let Some(types) = extract_type_labels(params) {
-        format!("{} ({})", upper, types)
-    } else {
-        upper
-    }
-}
-
-fn extract_type_labels(params: &Value) -> Option<String> {
-    let entry = params.get("type")?;
-    match entry {
-        Value::String(s) if !s.is_empty() => Some(s.to_uppercase()),
-        Value::Array(items) => {
-            let mut labels = Vec::new();
-            for item in items {
-                if let Some(text) = item.as_str() {
-                    labels.push(text.to_uppercase());
+) -> Vec<DetailsSection> {
+    use std::collections::HashSet;
+    
+    let mut sections = Vec::new();
+    let mut used_props: HashSet<(String, i64)> = HashSet::new(); // (field, seq) pairs that have been assigned
+    
+    // Fields to exclude from Extras (card pane fields)
+    let card_fields: HashSet<&str> = ["FN", "N", "NICKNAME", "PHOTO", "LOGO", "REV", "UID", "PRODID", "VERSION"]
+        .iter()
+        .copied()
+        .collect();
+    
+    // Build each configured section
+    for section_config in &config.sections {
+        let mut fields = Vec::new();
+        
+        for prop in props {
+            let field_upper = prop.field.to_uppercase();
+            
+            // Check if this field matches any of the section's configured fields
+            let matches = section_config.fields.iter().any(|f| {
+                let f_upper = f.to_uppercase();
+                if f_upper.ends_with('*') {
+                    // Wildcard match (e.g., "X-*" matches "X-TELEGRAM")
+                    field_upper.starts_with(&f_upper[..f_upper.len()-1])
+                } else {
+                    field_upper == f_upper
+                }
+            });
+            
+            if matches {
+                let prop_key = (prop.field.clone(), prop.seq);
+                if !used_props.contains(&prop_key) {
+                    used_props.insert(prop_key);
+                    fields.push(build_details_field(prop, default_region));
                 }
             }
-            if labels.is_empty() {
-                None
-            } else {
-                Some(labels.join("/"))
-            }
         }
-        _ => None,
+        
+        // Only add section if it has fields
+        if !fields.is_empty() {
+            sections.push(DetailsSection {
+                name: section_config.name.clone(),
+                fields,
+            });
+        }
+    }
+    
+    // Build "Extras" section for any remaining props not covered by configured sections
+    let mut extras_fields = Vec::new();
+    for prop in props {
+        let field_upper = prop.field.to_uppercase();
+        let prop_key = (prop.field.clone(), prop.seq);
+        
+        // Skip if already used or if it's a card-pane field
+        if used_props.contains(&prop_key) || card_fields.contains(field_upper.as_str()) {
+            continue;
+        }
+        
+        extras_fields.push(build_details_field(prop, default_region));
+    }
+    
+    if !extras_fields.is_empty() {
+        sections.push(DetailsSection {
+            name: "Extras".to_string(),
+            fields: extras_fields,
+        });
+    }
+    
+    sections
+}
+
+/// Build a single field for the details pane
+fn build_details_field(prop: &PropRow, default_region: Option<&str>) -> DetailsField {
+    let field_upper = prop.field.to_uppercase();
+    
+    // Extract TYPE values as a list
+    let types = extract_type_list(&prop.params);
+    
+    // Extract NOTE parameter
+    let note = prop.params.get("note")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    
+    // Format value based on field type
+    let (label, value, copy_value) = match field_upper.as_str() {
+        "TEL" => {
+            let base = vcard_io::phone_display_value(&prop.value, default_region);
+            ("TEL".to_string(), base.clone(), base)
+        }
+        "EMAIL" => {
+            let base = prop.value.trim().to_string();
+            ("EMAIL".to_string(), base.clone(), base)
+        }
+        "ADR" => {
+            let formatted = format_address_value(prop);
+            ("ADDRESS".to_string(), formatted.clone(), formatted)
+        }
+        "NOTE" => {
+            let value = prop.value.clone();
+            ("".to_string(), value.clone(), value)
+        }
+        _ => {
+            // For X-* fields, use a cleaner label
+            let label = if field_upper.starts_with("X-") {
+                field_upper[2..].to_string()
+            } else {
+                field_upper.clone()
+            };
+            let value = prop.value.clone();
+            (label, value.clone(), value)
+        }
+    };
+    
+    // Build full display label
+    let display_label = if label.is_empty() {
+        prop.field.to_uppercase()
+    } else {
+        label
+    };
+    
+    DetailsField {
+        label: display_label,
+        value,
+        copy_value,
+        types,
+        note,
+        source: Some(FieldRef::new(prop.field.clone(), prop.seq)),
     }
 }
 
-fn prop_has_type(params: &Value, expected: &str) -> bool {
-    let expected_lower = expected.to_ascii_lowercase();
-    match params.get("type") {
-        Some(Value::String(s)) => s.eq_ignore_ascii_case(&expected_lower),
-        Some(Value::Array(items)) => items.iter().any(|item| {
-            item.as_str()
-                .map(|text| text.eq_ignore_ascii_case(&expected_lower))
-                .unwrap_or(false)
-        }),
-        _ => false,
+/// Extract TYPE parameter as a list of strings
+fn extract_type_list(params: &Value) -> Vec<String> {
+    let Some(entry) = params.get("type") else {
+        return Vec::new();
+    };
+    
+    match entry {
+        Value::String(s) if !s.is_empty() => vec![s.to_uppercase()],
+        Value::Array(items) => {
+            items.iter()
+                .filter_map(|item| item.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_uppercase())
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }
 
-fn format_with_index(value: &str, seq: i64) -> String {
-    format!("{} [{}]", value, seq + 1)
+/// Extract TYPE parameter as a combined string (e.g., "WORK/CELL")
+fn extract_type_labels(params: &Value) -> Option<String> {
+    let types = extract_type_list(params);
+    if types.is_empty() {
+        None
+    } else {
+        Some(types.join("/"))
+    }
 }
 
 fn format_address_value(prop: &PropRow) -> String {
@@ -3046,6 +3686,17 @@ fn name_components(value: &str) -> Vec<String> {
     }
     components
 }
+
+/// Truncate a string to max_len characters, adding "..." if truncated
+fn truncate_value(value: &str, max_len: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() <= max_len {
+        trimmed.to_string()
+    } else {
+        format!("{}...", &trimmed[..max_len.saturating_sub(3)])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchFocus {
     Input,

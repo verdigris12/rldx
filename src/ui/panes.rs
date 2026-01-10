@@ -1,75 +1,69 @@
+/// Panel identifiers for the new 3-panel layout
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DetailTab {
-    Work,
-    Personal,
-    Accounts,
-    Metadata,
+pub enum Panel {
+    /// Panel 1: Contact card (name, alias, phone, email)
+    Card,
+    /// Panel 2: Details (scrollable sections: Notes, Contacts, Job, Personal, Extras)
+    Details,
+    /// Panel 3: Profile image
+    Image,
 }
 
-impl DetailTab {
-    pub const ALL: [DetailTab; 4] = [
-        DetailTab::Work,
-        DetailTab::Personal,
-        DetailTab::Accounts,
-        DetailTab::Metadata,
-    ];
+#[allow(dead_code)]
+impl Panel {
+    pub const ALL: [Panel; 3] = [Panel::Card, Panel::Details, Panel::Image];
 
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 3;
 
     pub fn title(self) -> &'static str {
         match self {
-            DetailTab::Work => "Work",
-            DetailTab::Personal => "Personal",
-            DetailTab::Accounts => "Accounts",
-            DetailTab::Metadata => "Full Metadata",
+            Panel::Card => "CARD",
+            Panel::Details => "DETAILS",
+            Panel::Image => "IMAGE",
         }
     }
 
     pub fn digit(self) -> char {
         match self {
-            DetailTab::Work => '2',
-            DetailTab::Personal => '3',
-            DetailTab::Accounts => '4',
-            DetailTab::Metadata => '5',
+            Panel::Card => '1',
+            Panel::Details => '2',
+            Panel::Image => '3',
         }
     }
 
     pub fn index(self) -> usize {
         match self {
-            DetailTab::Work => 0,
-            DetailTab::Personal => 1,
-            DetailTab::Accounts => 2,
-            DetailTab::Metadata => 3,
+            Panel::Card => 0,
+            Panel::Details => 1,
+            Panel::Image => 2,
         }
     }
 
     pub fn from_digit(digit: char) -> Option<Self> {
         match digit {
-            '2' => Some(DetailTab::Work),
-            '3' => Some(DetailTab::Personal),
-            '4' => Some(DetailTab::Accounts),
-            '5' => Some(DetailTab::Metadata),
+            '1' => Some(Panel::Card),
+            '2' => Some(Panel::Details),
+            '3' => Some(Panel::Image),
             _ => None,
         }
     }
 
-    /// Get the next tab, or None if at the end
+    /// Get the next panel, or None if at the end
     pub fn next(self) -> Option<Self> {
         match self {
-            DetailTab::Work => Some(DetailTab::Personal),
-            DetailTab::Personal => Some(DetailTab::Accounts),
-            DetailTab::Accounts => Some(DetailTab::Metadata),
-            DetailTab::Metadata => None,
+            Panel::Card => Some(Panel::Details),
+            Panel::Details => Some(Panel::Image),
+            Panel::Image => None,
         }
     }
 
-    /// Get the previous tab, or None if at the beginning
+    /// Get the previous panel, or None if at the beginning
     pub fn prev(self) -> Option<Self> {
         match self {
-            DetailTab::Work => None,
-            DetailTab::Personal => Some(DetailTab::Work),
-            DetailTab::Accounts => Some(DetailTab::Personal),
-            DetailTab::Metadata => Some(DetailTab::Accounts),
+            Panel::Card => None,
+            Panel::Details => Some(Panel::Card),
+            Panel::Image => Some(Panel::Details),
         }
     }
 }

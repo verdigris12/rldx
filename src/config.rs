@@ -26,6 +26,7 @@ pub struct Config {
     pub maildir_import: MaildirImportConfig,
     pub encryption: EncryptionConfig,
     pub sync: SyncConfig,
+    pub details_sections: DetailsSectionsConfig,
     pub remotes: Vec<RemoteConfig>,
 }
 
@@ -115,6 +116,70 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             conflict_prefer: ConflictPreference::Theirs,
+        }
+    }
+}
+
+// =============================================================================
+// Details Sections Configuration
+// =============================================================================
+
+/// Configuration for how fields are grouped into sections in the Details pane
+#[derive(Debug, Clone)]
+pub struct DetailsSectionsConfig {
+    /// Ordered list of sections to display
+    pub sections: Vec<SectionMapping>,
+}
+
+/// A single section mapping
+#[derive(Debug, Clone)]
+pub struct SectionMapping {
+    /// Display name for the section (e.g., "Notes", "Contacts", "Job")
+    pub name: String,
+    /// vCard field names that belong to this section (e.g., ["NOTE"], ["TEL", "EMAIL"])
+    pub fields: Vec<String>,
+}
+
+impl Default for DetailsSectionsConfig {
+    fn default() -> Self {
+        Self {
+            sections: vec![
+                SectionMapping {
+                    name: "Notes".to_string(),
+                    fields: vec!["NOTE".to_string()],
+                },
+                SectionMapping {
+                    name: "Contacts".to_string(),
+                    fields: vec![
+                        "TEL".to_string(),
+                        "EMAIL".to_string(),
+                        "IMPP".to_string(),
+                        "URL".to_string(),
+                        "X-TELEGRAM".to_string(),
+                        "X-WHATSAPP".to_string(),
+                        "X-SIGNAL".to_string(),
+                        "X-XMPP".to_string(),
+                    ],
+                },
+                SectionMapping {
+                    name: "Job".to_string(),
+                    fields: vec![
+                        "ORG".to_string(),
+                        "TITLE".to_string(),
+                        "ROLE".to_string(),
+                    ],
+                },
+                SectionMapping {
+                    name: "Personal".to_string(),
+                    fields: vec![
+                        "BDAY".to_string(),
+                        "GENDER".to_string(),
+                        "ADR".to_string(),
+                        "ANNIVERSARY".to_string(),
+                        "X-STATUS".to_string(),
+                    ],
+                },
+            ],
         }
     }
 }
@@ -290,9 +355,10 @@ impl RemoteConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarAction {
     Help,
-    Edit,
+    Sync,
     Refresh,
     Share,
+    Delete,
 }
 
 impl TopBarAction {
@@ -300,9 +366,10 @@ impl TopBarAction {
     pub fn title(&self) -> &'static str {
         match self {
             TopBarAction::Help => "HELP",
-            TopBarAction::Edit => "EDIT",
+            TopBarAction::Sync => "SYNC",
             TopBarAction::Refresh => "REFRESH",
             TopBarAction::Share => "SHARE",
+            TopBarAction::Delete => "DELETE",
         }
     }
 
@@ -310,9 +377,10 @@ impl TopBarAction {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "help" => Some(TopBarAction::Help),
-            "edit" => Some(TopBarAction::Edit),
+            "sync" => Some(TopBarAction::Sync),
             "refresh" => Some(TopBarAction::Refresh),
             "share" => Some(TopBarAction::Share),
+            "delete" => Some(TopBarAction::Delete),
             _ => None,
         }
     }
@@ -348,9 +416,9 @@ impl Default for TopBarConfig {
         Self {
             buttons: vec![
                 TopBarButton { key: "F1".into(), action: TopBarAction::Help },
-                TopBarButton { key: "F3".into(), action: TopBarAction::Edit },
-                TopBarButton { key: "F5".into(), action: TopBarAction::Refresh },
-                TopBarButton { key: "F7".into(), action: TopBarAction::Share },
+                TopBarButton { key: "F2".into(), action: TopBarAction::Sync },
+                TopBarButton { key: "F3".into(), action: TopBarAction::Share },
+                TopBarButton { key: "F8".into(), action: TopBarAction::Delete },
             ],
         }
     }
@@ -603,12 +671,11 @@ pub struct SearchResultsKeys {
 pub struct NavigationKeys {
     pub next: Vec<String>,
     pub prev: Vec<String>,
-    pub tab_next: Vec<String>,
-    pub tab_prev: Vec<String>,
     pub edit: Vec<String>,
     pub copy: Vec<String>,
     pub confirm: Vec<String>,
-    pub add_alias: Vec<String>,
+    pub add_field: Vec<String>,
+    pub delete_field: Vec<String>,
     pub photo_fetch: Vec<String>,
     pub lang_cycle: Vec<String>,
 }
@@ -689,14 +756,13 @@ impl Default for SearchResultsKeys {
 impl Default for NavigationKeys {
     fn default() -> Self {
         Self {
-            next: vec!["j".into(), "Down".into(), "Tab".into()],
-            prev: vec!["k".into(), "Up".into(), "Backtab".into()],
-            tab_next: vec!["l".into(), "Right".into()],
-            tab_prev: vec!["h".into(), "Left".into()],
+            next: vec!["Tab".into(), "j".into(), "Down".into()],
+            prev: vec!["Backspace".into(), "k".into(), "Up".into()],
             edit: vec!["e".into()],
-            copy: vec!["y".into(), "Space".into()],
+            copy: vec!["Space".into()],
             confirm: vec!["Enter".into()],
-            add_alias: vec!["a".into()],
+            add_field: vec!["a".into()],
+            delete_field: vec!["d".into()],
             photo_fetch: vec!["i".into()],
             lang_cycle: vec!["L".into()],
         }
@@ -841,12 +907,11 @@ impl Default for SearchResultsKeysFile {
 struct NavigationKeysFile {
     next: KeyBinding,
     prev: KeyBinding,
-    tab_next: KeyBinding,
-    tab_prev: KeyBinding,
     edit: KeyBinding,
     copy: KeyBinding,
     confirm: KeyBinding,
-    add_alias: KeyBinding,
+    add_field: KeyBinding,
+    delete_field: KeyBinding,
     photo_fetch: KeyBinding,
     lang_cycle: KeyBinding,
 }
@@ -857,12 +922,11 @@ impl Default for NavigationKeysFile {
         Self {
             next: KeyBinding::Multiple(defaults.next),
             prev: KeyBinding::Multiple(defaults.prev),
-            tab_next: KeyBinding::Multiple(defaults.tab_next),
-            tab_prev: KeyBinding::Multiple(defaults.tab_prev),
             edit: KeyBinding::Multiple(defaults.edit),
             copy: KeyBinding::Multiple(defaults.copy),
             confirm: KeyBinding::Multiple(defaults.confirm),
-            add_alias: KeyBinding::Multiple(defaults.add_alias),
+            add_field: KeyBinding::Multiple(defaults.add_field),
+            delete_field: KeyBinding::Multiple(defaults.delete_field),
             photo_fetch: KeyBinding::Multiple(defaults.photo_fetch),
             lang_cycle: KeyBinding::Multiple(defaults.lang_cycle),
         }
@@ -976,12 +1040,11 @@ impl From<NavigationKeysFile> for NavigationKeys {
         Self {
             next: file.next.into_vec(),
             prev: file.prev.into_vec(),
-            tab_next: file.tab_next.into_vec(),
-            tab_prev: file.tab_prev.into_vec(),
             edit: file.edit.into_vec(),
             copy: file.copy.into_vec(),
             confirm: file.confirm.into_vec(),
-            add_alias: file.add_alias.into_vec(),
+            add_field: file.add_field.into_vec(),
+            delete_field: file.delete_field.into_vec(),
             photo_fetch: file.photo_fetch.into_vec(),
             lang_cycle: file.lang_cycle.into_vec(),
         }
@@ -1102,12 +1165,11 @@ fn validate_key_bindings(keys: &Keys) -> Result<()> {
         &[
             ("next", &keys.navigation.next),
             ("prev", &keys.navigation.prev),
-            ("tab_next", &keys.navigation.tab_next),
-            ("tab_prev", &keys.navigation.tab_prev),
             ("edit", &keys.navigation.edit),
             ("copy", &keys.navigation.copy),
             ("confirm", &keys.navigation.confirm),
-            ("add_alias", &keys.navigation.add_alias),
+            ("add_field", &keys.navigation.add_field),
+            ("delete_field", &keys.navigation.delete_field),
             ("photo_fetch", &keys.navigation.photo_fetch),
             ("lang_cycle", &keys.navigation.lang_cycle),
         ],
@@ -1167,6 +1229,8 @@ struct ConfigFile {
     #[serde(default)]
     sync: SyncFile,
     #[serde(default)]
+    details_sections: DetailsSectionsFile,
+    #[serde(default)]
     remotes: Vec<RemoteFile>,
 }
 
@@ -1184,6 +1248,7 @@ impl Default for ConfigFile {
             maildir_import: MaildirImportFile::default(),
             encryption: EncryptionFile::default(),
             sync: SyncFile::default(),
+            details_sections: DetailsSectionsFile::default(),
             remotes: Vec::new(),
         }
     }
@@ -1227,7 +1292,7 @@ impl From<TopBarFile> for TopBarConfig {
             // Validate action
             let Some(action) = TopBarAction::from_str(&action_str) else {
                 eprintln!(
-                    "warning: invalid top_bar action '{}' for key '{}', expected one of: help, edit, refresh, share",
+                    "warning: invalid top_bar action '{}' for key '{}', expected one of: help, sync, refresh, share, delete",
                     action_str, key
                 );
                 continue;
@@ -1375,6 +1440,44 @@ impl From<SyncFile> for SyncConfig {
             .unwrap_or(ConflictPreference::Theirs);
 
         SyncConfig { conflict_prefer }
+    }
+}
+
+// =============================================================================
+// Details Sections File Deserialization
+// =============================================================================
+
+/// File representation of details_sections config
+/// Format: { "SectionName" = ["FIELD1", "FIELD2", ...], ... }
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct DetailsSectionsFile {
+    #[serde(flatten)]
+    sections: HashMap<String, Vec<String>>,
+}
+
+impl From<DetailsSectionsFile> for DetailsSectionsConfig {
+    fn from(file: DetailsSectionsFile) -> Self {
+        if file.sections.is_empty() {
+            return DetailsSectionsConfig::default();
+        }
+
+        // Preserve a stable order: sort by section name
+        let mut section_names: Vec<_> = file.sections.keys().cloned().collect();
+        section_names.sort();
+
+        let sections = section_names
+            .into_iter()
+            .map(|name| {
+                let fields = file.sections.get(&name).cloned().unwrap_or_default();
+                SectionMapping {
+                    name,
+                    fields: fields.into_iter().map(|f| f.to_uppercase()).collect(),
+                }
+            })
+            .collect();
+
+        DetailsSectionsConfig { sections }
     }
 }
 
@@ -1560,6 +1663,9 @@ pub fn load_from(custom_path: Option<&Path>) -> Result<Config> {
         }
     }
 
+    // Parse details sections config
+    let details_sections: DetailsSectionsConfig = cfg_file.details_sections.into();
+
     Ok(Config {
         config_path: path,
         vdir,
@@ -1573,6 +1679,7 @@ pub fn load_from(custom_path: Option<&Path>) -> Result<Config> {
         maildir_import: cfg_file.maildir_import.into(),
         encryption,
         sync,
+        details_sections,
         remotes,
     })
 }
@@ -1598,6 +1705,7 @@ fn warn_unknown_keys(value: &toml::Value) {
         "maildir_import".to_string(),
         "encryption".to_string(),
         "sync".to_string(),
+        "details_sections".to_string(),
         "remotes".to_string(),
     ]);
 
@@ -1686,12 +1794,11 @@ fn warn_unknown_keys_section(value: &toml::Value) {
             &[
                 "next",
                 "prev",
-                "tab_next",
-                "tab_prev",
                 "edit",
                 "copy",
                 "confirm",
-                "add_alias",
+                "add_field",
+                "delete_field",
                 "photo_fetch",
                 "lang_cycle",
             ],

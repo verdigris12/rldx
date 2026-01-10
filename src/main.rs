@@ -885,9 +885,9 @@ db_path = "{db_path}"
 # =============================================================================
 # Encryption (required)
 # =============================================================================
-# All vCard files are encrypted. Supported backends:
-#   gpg - GPG encryption (uses gpg-agent, files stored as .vcf.gpg)
-#   age - Age encryption (modern alternative, files stored as .vcf.age)
+# All vCard files are encrypted. Both backends store files as .vcf.age.
+#   gpg - Uses GPG key to derive encryption key (requires gpg-agent)
+#   age - Uses Age X25519 keys directly (modern, simpler)
 
 {encryption}
 

@@ -18,13 +18,16 @@ rldx is a terminal PIM for browsing and managing vCard 4.0 contact collections s
 - Phone number normalization to E.164 (via `rlibphonenumber`)
 - Photo/logo display via kitty graphics protocol
 - Google Contacts import (vCard 3.0 -> 4.0 conversion)
+- Maildir import (extract contacts from email headers)
 - Configurable keybindings, colors, and field layout
+- Age and GPG encryption for vCard files (`.vcf.age`, `.vcf.gpg`)
+- SQLCipher encryption for database
+- CardDAV sync (bidirectional, via libdav 0.10)
+- Automated tests (34 unit + 14 integration)
 
 **Not yet implemented:**
 
 - Photo fetching from URLs (scaffolded but not wired)
-- CardDAV sync (libdav dependency exists, feature-flagged as `dav`)
-- Automated tests
 
 **Binary name:** `rldx`
 
@@ -60,8 +63,16 @@ image = "0.24.9"             # Photo decoding
 rlibphonenumber = "0.2.3"    # Phone normalization
 directories = "5.0.1"        # XDG paths
 
-# Optional
-libdav = "0.9.6"             # CardDAV (feature = "dav", not wired)
+# Encryption
+age = "0.11"                 # Age encryption
+gpgme = "0.11"               # GPG encryption (optional)
+hex = "0.4"                  # Hex encoding for DB keys
+
+# CardDAV
+libdav = "0.10"              # CardDAV client
+hyper-rustls = "0.27"        # HTTPS support
+tower-http = "0.6"           # HTTP middleware (auth)
+tokio = "1.0"                # Async runtime
 ```
 
 ---
@@ -74,11 +85,14 @@ rldx/
   src/
     main.rs              # CLI entry + app startup + reindex logic
     config.rs            # Load/validate TOML config
+    crypto.rs            # Age/GPG encryption providers
     vcard_io.rs          # vCard read/write using vcard4 crate
     vdir.rs              # Scan, normalize, atomic file writes
     db.rs                # SQLite schema, CRUD, queries
     search.rs            # Query normalization helpers
     indexer.rs           # Build IndexedItem/IndexedProp from vCard
+    sync.rs              # CardDAV sync engine
+    translit.rs          # Transliteration for non-Latin scripts
     ui/
       mod.rs             # Module exports
       app.rs             # App state + event loop (~2200 lines)
@@ -88,6 +102,15 @@ rldx/
     import/
       mod.rs             # Module exports
       google.rs          # Google Contacts vCard 3.0 -> 4.0 converter
+      maildir.rs         # Maildir email header extraction
+      simhash_index.rs   # SimHash-based fuzzy matching for dedup
+    remote/
+      mod.rs             # Remote trait and types
+      carddav.rs         # CardDAV client implementation (libdav)
+  tests/
+    integration.rs       # Integration tests
+    test_contacts.vcf    # Sample Google Contacts export
+    test_maildir/        # Sample maildir for testing
 ```
 
 ---
@@ -98,6 +121,17 @@ rldx/
 
 ```toml
 vdir = "/home/USER/.contacts"          # required
+db_path = "/home/USER/.local/share/rldx/index.db"  # optional
+
+# Encryption (required)
+[encryption]
+type = "age"                           # "age" or "gpg"
+age_identity = "/path/to/age-identity.txt"
+age_recipient = "age1..."
+# OR for GPG:
+# type = "gpg"
+# gpg_key_id = "0x..."
+
 # phone_region = "US"                  # optional, for phone normalization
 
 # Key bindings are organized by context
@@ -154,6 +188,16 @@ confirm = ["Enter"]
 
 [commands]
 copy = ["wl-copy"]  # or ["xclip", "-selection", "clipboard"]
+
+# CardDAV remotes (optional, multiple allowed)
+[[remotes]]
+name = "fastmail"
+url = "https://carddav.fastmail.com"
+username = "user@example.com"
+password_cmd = "pass show fastmail/carddav"  # command to get password
+address_book = "Default"                      # address book name on server
+local_book = "fastmail"                       # optional: sync to subdirectory
+conflict_prefer = "theirs"                    # "ours" or "theirs"
 ```
 
 **Supported key names:**
@@ -191,10 +235,11 @@ When rldx starts and no `.rldx_normalized` marker exists:
 
 ## 6) SQLite Schema
 
-**Location:** `~/.local/share/rldx/index.db`
+**Location:** `~/.local/share/rldx/index.db` (encrypted with SQLCipher)
 
 **Pragmas:**
 ```sql
+PRAGMA key = 'x<derived-key>';  -- SQLCipher encryption
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=FULL;
 PRAGMA foreign_keys=ON;
@@ -207,6 +252,8 @@ CREATE TABLE IF NOT EXISTS items (
   uuid      TEXT PRIMARY KEY,
   path      TEXT UNIQUE NOT NULL,
   fn        TEXT NOT NULL,          -- display name (chosen FN)
+  fn_norm   TEXT,                   -- normalized for search
+  fn_simhash INTEGER,               -- SimHash for fuzzy matching
   rev       TEXT,                   -- vCard REV timestamp
   has_photo INTEGER NOT NULL DEFAULT 0,
   has_logo  INTEGER NOT NULL DEFAULT 0,
@@ -220,9 +267,30 @@ CREATE TABLE IF NOT EXISTS props (
   fn     TEXT NOT NULL,             -- copy for quick LIKE
   field  TEXT NOT NULL,             -- FN, TEL, EMAIL, ORG, etc.
   value  TEXT NOT NULL,
+  value_norm TEXT,                  -- normalized for search
   params TEXT DEFAULT '{}',         -- JSON of vCard parameters
   seq    INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (uuid, field, seq, value)
+);
+
+-- SimHash index for fuzzy name matching
+CREATE TABLE IF NOT EXISTS simhashes (
+  uuid TEXT NOT NULL REFERENCES items(uuid) ON DELETE CASCADE,
+  simhash INTEGER NOT NULL,
+  source TEXT NOT NULL,             -- 'fn', 'nickname', etc.
+  value_norm TEXT NOT NULL,
+  PRIMARY KEY (uuid, simhash, source, value_norm)
+);
+
+-- Sync metadata for CardDAV remotes
+CREATE TABLE IF NOT EXISTS sync_metadata (
+  contact_path TEXT NOT NULL,
+  remote_name TEXT NOT NULL,
+  remote_href TEXT NOT NULL,
+  remote_etag TEXT,
+  last_synced INTEGER,
+  local_modified INTEGER DEFAULT 0,
+  PRIMARY KEY (contact_path, remote_name)
 );
 ```
 
@@ -413,7 +481,9 @@ For EMAIL and TEL fields with multiple values:
 
 ---
 
-## 13) Google Import
+## 13) Import
+
+### Google Contacts
 
 ```bash
 rldx import --format google contacts.vcf [--book subdir]
@@ -423,6 +493,17 @@ rldx import --format google contacts.vcf [--book subdir]
 - Handles quoted-printable encoding, base64 photos
 - Assigns new UUIDs, updates REV timestamps
 - Saves to configured vdir (or `--book` subdirectory)
+
+### Maildir
+
+```bash
+rldx import --format maildir ~/Mail/INBOX [--book subdir]
+```
+
+- Extracts contacts from email headers (From, To, Cc)
+- Uses SimHash-based fuzzy matching to avoid duplicates
+- Filters out noreply addresses, high-entropy strings, and local domains
+- Configurable skip patterns in config.toml
 
 ---
 
@@ -502,26 +583,65 @@ struct PaneField {
 
 ---
 
-## 16) Future Work
+## 16) CardDAV Sync
+
+### Commands
+
+```bash
+rldx sync <remote>              # Full bidirectional sync
+rldx sync <remote> --pull-only  # Download only
+rldx sync <remote> --dry-run    # Preview changes
+
+rldx remote add <name> --url <url> --username <user>
+rldx remote list
+rldx remote remove <name> [--purge]
+rldx remote test <name>
+```
+
+### Sync Behavior
+
+**Pull phase:**
+1. List all remote contacts (PROPFIND with etags)
+2. Compare etags with stored sync_metadata
+3. Download new/changed contacts in batches of 50 (addressbook-multiget)
+4. Handle remote deletions (remove local files if remote contact gone)
+
+**Push phase:**
+1. List local vCard files
+2. Compare mtime with last_synced in sync_metadata
+3. Upload new/modified contacts (PUT with text/vcard)
+4. Delete remote contacts for locally-deleted files
+
+**Conflict resolution:**
+- Configurable via `conflict_prefer` in remote config
+- `theirs`: Remote wins (default)
+- `ours`: Local wins
+
+**File naming:**
+- Local files named by UUID extracted from vCard UID
+- Avoids metadata leakage from remote filenames
+
+### Implementation
+
+Uses libdav 0.10 with:
+- `CardDavClient::bootstrap_via_service_discovery()` for auto-discovery
+- `FindAddressBookHomeSet` + `FindAddressBooks` to locate address book
+- `GetAddressBookResources` for listing and multiget
+- `PutResource` for uploads
+- `Delete` for deletions
+
+---
+
+## 17) Future Work
 
 **Photo fetch (scaffolded):**
 - Key `i` should trigger fetch from PHOTO/LOGO URI
 - GET with reqwest, downscale to 512x512, encode PNG, embed as data: URI
 - Confirm before fetching remote URLs
 
-**CardDAV sync (libdav):**
-- Feature flag `--features dav`
-- CLI: `rldx --dav-pull --url ... --user ... --pass-command ...`
-- Pull only (no push in v0)
-- Download new/changed cards into vdir, trigger reindex
-
-**Tests:**
-- Integration tests for normalization, indexing, import
-- Sample vcards in `tests/data/`
-
 ---
 
-## 17) Code Style Guidelines
+## 18) Code Style Guidelines
 
 - Prefer explicit, straightforward code over clever abstractions
 - Use `anyhow::Result` for fallible operations

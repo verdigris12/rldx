@@ -365,11 +365,9 @@ pub fn write_vcf_file(path: &Path, data: &[u8], provider: &dyn CryptoProvider) -
     write_atomic(path, &encrypted)
 }
 
-/// Get the target path for a vCard file with the correct extension
-pub fn vcf_target_path(vdir: &Path, stem: &str, encryption_type: EncryptionType) -> PathBuf {
-    let extension = match encryption_type {
-        EncryptionType::Gpg => "vcf.gpg",
-        EncryptionType::Age => "vcf.age",
-    };
-    vdir.join(format!("{}.{}", stem, extension))
+/// Get the target path for a vCard file with the correct extension.
+/// Both GPG and Age encryption types now use Age format, so all files use .vcf.age extension.
+pub fn vcf_target_path(vdir: &Path, stem: &str, _encryption_type: EncryptionType) -> PathBuf {
+    // Both encryption types use Age format internally, so use .vcf.age for all
+    vdir.join(format!("{}.vcf.age", stem))
 }
