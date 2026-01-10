@@ -330,6 +330,7 @@ pub fn update_card_field(
         "EMAIL" => Ok(update_email_value(card, seq, new_value)),
         "FN" => Ok(update_fn_value(card, seq, new_value)),
         "N" => Ok(update_n_value(card, component, new_value)),
+        "NICKNAME" => Ok(update_nickname_value(card, seq, new_value)),
         _ => Ok(false),
     }
 }
@@ -450,5 +451,27 @@ fn update_n_value(card: &mut Vcard, component: Option<usize>, new_value: &str) -
     }
 
     entry.value[index] = trimmed;
+    true
+}
+
+fn update_nickname_value(card: &mut Vcard, seq: i64, new_value: &str) -> bool {
+    let trimmed = new_value.trim().to_string();
+    let mut index = 0i64;
+    for prop in &mut card.nickname {
+        if index == seq {
+            prop.value = trimmed;
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Delete a nickname entry by index
+pub fn delete_nickname_entry(card: &mut Vcard, index: usize) -> bool {
+    if index >= card.nickname.len() {
+        return false;
+    }
+    card.nickname.remove(index);
     true
 }

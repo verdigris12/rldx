@@ -146,6 +146,8 @@ pub struct ModalKeys {
     pub edit: Vec<String>,
     pub copy: Vec<String>,
     pub set_default: Vec<String>,
+    pub delete: Vec<String>,
+    pub add: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +237,8 @@ impl Default for ModalKeys {
             edit: vec!["e".into()],
             copy: vec!["y".into(), "Space".into()],
             set_default: vec!["d".into()],
+            delete: vec!["x".into()],
+            add: vec!["a".into()],
         }
     }
 }
@@ -399,6 +403,8 @@ struct ModalKeysFile {
     edit: KeyBinding,
     copy: KeyBinding,
     set_default: KeyBinding,
+    delete: KeyBinding,
+    add: KeyBinding,
 }
 
 impl Default for ModalKeysFile {
@@ -412,6 +418,8 @@ impl Default for ModalKeysFile {
             edit: KeyBinding::Multiple(defaults.edit),
             copy: KeyBinding::Multiple(defaults.copy),
             set_default: KeyBinding::Multiple(defaults.set_default),
+            delete: KeyBinding::Multiple(defaults.delete),
+            add: KeyBinding::Multiple(defaults.add),
         }
     }
 }
@@ -514,6 +522,8 @@ impl From<ModalKeysFile> for ModalKeys {
             edit: file.edit.into_vec(),
             copy: file.copy.into_vec(),
             set_default: file.set_default.into_vec(),
+            delete: file.delete.into_vec(),
+            add: file.add.into_vec(),
         }
     }
 }

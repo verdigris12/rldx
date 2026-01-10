@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
 };
+use ratatui::symbols::line::NORMAL as LINE;
 use ratatui::{Frame, Terminal};
 use ratatui_image::{Resize, StatefulImage};
 // Use Popup from tui-widgets to render modals
@@ -17,7 +18,9 @@ use super::app::{App, MultiValueField, PaneField, PaneFocus, SearchFocus, Search
 use super::panes::DetailTab;
 
 const MULTIVALUE_HELP: &str =
-    "TAB/Down: next  Backspace/Up: prev  Space: copy & close  Enter: set default  E: edit  Q/Esc: close";
+    "j/k: nav  Space: copy  Enter: default  e: edit  q/Esc: close";
+const ALIAS_MODAL_HELP: &str =
+    "j/k: nav  Space: copy  e: edit  a: add  x: delete  q/Esc: close";
 const SEARCH_HELP_INPUT: &str =
     "Type to filter  Esc: focus results  Enter: open";
 const ADD_ALIAS_HELP: &str = "Type alias  Enter: add  Esc: cancel";
@@ -181,11 +184,11 @@ fn draw_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
-    draw_search_header(frame, layout[0], app, active);
+    draw_search_header(frame, layout[0], app, active, area.width);
     draw_search_list(frame, layout[1], app);
 }
 
-fn draw_search_header(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool) {
+fn draw_search_header(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool, outer_width: u16) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -231,9 +234,24 @@ fn draw_search_header(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool
         frame.set_cursor_position((x, parts[0].y));
     }
 
-    let separator = "═".repeat(parts[1].width as usize);
+    // Build separator with connector characters: ├───┤
+    let inner_width = outer_width.saturating_sub(2) as usize;
+    let separator = format!(
+        "{}{}{}",
+        LINE.vertical_right,
+        LINE.horizontal.to_string().repeat(inner_width),
+        LINE.vertical_left
+    );
     let separator_line = Line::from(Span::styled(separator, separator_style(app)));
-    frame.render_widget(Paragraph::new(separator_line), parts[1]);
+    
+    // Render at the separator row, shifted left by 1 to start at the border
+    let separator_area = Rect {
+        x: parts[1].x.saturating_sub(1),
+        y: parts[1].y,
+        width: outer_width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(separator_line), separator_area);
 }
 
 fn draw_search_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -287,7 +305,7 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
             header_text_style(app),
         ))
     };
-    render_header_with_double_line(frame, layout[0], header_line, app, None);
+    render_header_with_separator(frame, layout[0], header_line, app, None, area.width);
 
     let mut lines: Vec<Line> = Vec::new();
     let mut cursor = None;
@@ -296,10 +314,18 @@ fn draw_main_card(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else if app.card_fields.is_empty() {
         lines.push(Line::from("No data"));
     } else {
+        // Calculate max label width for alignment (label + colon)
+        let label_width = app
+            .card_fields
+            .iter()
+            .map(|f| f.label.len() + 1) // +1 for colon
+            .max()
+            .unwrap_or(0);
+
         for (idx, field) in app.card_fields.iter().enumerate() {
             let highlight = active && idx == app.card_field_index;
             let line_index = lines.len();
-            let (line, cursor_info) = field_line(app, field, highlight);
+            let (line, cursor_info) = field_line(app, field, highlight, label_width);
             if cursor.is_none() {
                 if let Some(column) = cursor_info {
                     cursor = Some((line_index, column));
@@ -332,13 +358,8 @@ fn draw_multivalue_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         width = area.width;
     }
 
-    // Popup content size is derived from computed width
-
-    let header =
-        Row::new(vec![Cell::from("VALUE"), Cell::from("TYPE")]).style(header_text_style(app));
-
     // Prepare table data and context before mutable borrow of popup state
-    let (field_title, selected_index, items_len, rows) = {
+    let (field_kind, field_title, selected_index, items_len, rows) = {
         let m = app.multivalue_modal().unwrap();
         let selected_index = m.selected();
         let field = m.field();
@@ -367,21 +388,42 @@ fn draw_multivalue_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 } else {
                     Cell::from(item.value.clone())
                 };
-                Row::new(vec![value_cell, Cell::from(item.type_label.clone())])
+                if field.has_type_label() {
+                    Row::new(vec![value_cell, Cell::from(item.type_label.clone())])
+                } else {
+                    Row::new(vec![value_cell])
+                }
             })
             .collect();
 
-        (field.title(), selected_index, items.len(), rows)
+        (field, field.title(), selected_index, items.len(), rows)
     };
 
-    let widths = [Constraint::Percentage(70), Constraint::Percentage(30)];
-    let table = Table::new(rows, widths)
-        .header(header)
-        .highlight_style(selection_style(app));
+    // Build header and table based on field type
+    let table = if field_kind.has_type_label() {
+        let header = Row::new(vec![Cell::from("VALUE"), Cell::from("TYPE")])
+            .style(header_text_style(app));
+        let widths = vec![Constraint::Percentage(70), Constraint::Percentage(30)];
+        Table::new(rows, widths)
+            .header(header)
+            .highlight_style(selection_style(app))
+    } else {
+        // No header for simple lists (e.g., Alias)
+        let widths = vec![Constraint::Percentage(100)];
+        Table::new(rows, widths)
+            .highlight_style(selection_style(app))
+    };
 
     // Build popup body placeholder sized to content area (width/height exclude borders)
     let content_width = width.saturating_sub(2) as usize;
-    let content_height = items_len.saturating_add(1); // header + items
+    // For fields with type labels, add 1 for header row; otherwise just item count
+    let content_height = if items_len == 0 {
+        2
+    } else if field_kind.has_type_label() {
+        items_len.saturating_add(1) // header + items
+    } else {
+        items_len // just items, no header
+    };
     let body_lines: Vec<Line> = (0..content_height)
         .map(|_| Line::from(" ".repeat(content_width)))
         .collect();
@@ -399,20 +441,33 @@ fn draw_multivalue_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         // Compute inner area (content area) based on borders
         let inner = Block::default().borders(Borders::ALL).inner(*area);
         if inner.width > 0 && inner.height > 0 {
-            let mut state = TableState::default();
-            state.select(Some(selected_index));
-            frame.render_stateful_widget(table, inner, &mut state);
-            // If editing inline, place cursor in the value cell of the selected row
-            if app.editor.active {
-                if let Some(target) = app.editor.target() {
-                    if let Some(field) = MultiValueField::from_field_name(&target.field) {
-                        if field_title.eq(field.title()) {
-                            let cursor_x = inner.x.saturating_add(app.editor.visual_cursor() as u16);
-                            let cursor_y = inner
-                                .y
-                                .saturating_add(1) // header row offset
-                                .saturating_add(selected_index as u16);
-                            frame.set_cursor_position((cursor_x, cursor_y));
+            if items_len == 0 {
+                // Show "No aliases" message for empty alias list
+                let msg = if field_kind == MultiValueField::Alias {
+                    "No aliases. Press 'a' to add."
+                } else {
+                    "No items"
+                };
+                let para = Paragraph::new(msg).style(header_text_style(app));
+                frame.render_widget(para, inner);
+            } else {
+                let mut state = TableState::default();
+                state.select(Some(selected_index));
+                frame.render_stateful_widget(table, inner, &mut state);
+                // If editing inline, place cursor in the value cell of the selected row
+                if app.editor.active {
+                    if let Some(target) = app.editor.target() {
+                        if let Some(field) = MultiValueField::from_field_name(&target.field) {
+                            if field_title.eq(field.title()) {
+                                let cursor_x = inner.x.saturating_add(app.editor.visual_cursor() as u16);
+                                // Add header row offset only for fields with type labels
+                                let header_offset = if field.has_type_label() { 1 } else { 0 };
+                                let cursor_y = inner
+                                    .y
+                                    .saturating_add(header_offset)
+                                    .saturating_add(selected_index as u16);
+                                frame.set_cursor_position((cursor_x, cursor_y));
+                            }
                         }
                     }
                 }
@@ -492,9 +547,9 @@ fn draw_help_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         let right_pad = padding_total - left_pad;
         let header_line = format!(
             "{}{}{}",
-            "═".repeat(left_pad),
+            LINE.horizontal.to_string().repeat(left_pad),
             header_text,
-            "═".repeat(right_pad)
+            LINE.horizontal.to_string().repeat(right_pad)
         );
         lines.push(Line::from(Span::styled(header_line, header_style)));
 
@@ -690,7 +745,7 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
-    render_header_with_double_line(frame, layout[0], build_tab_header(app), app, None);
+    render_header_with_separator(frame, layout[0], build_tab_header(app), app, None, area.width);
 
     let tab_index = app.tab.index();
     let fields = &app.tab_fields[tab_index];
@@ -700,10 +755,17 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if fields.is_empty() {
         lines.push(Line::from("No data"));
     } else {
+        // Calculate max label width for alignment (label + colon)
+        let label_width = fields
+            .iter()
+            .map(|f| f.label.len() + 1) // +1 for colon
+            .max()
+            .unwrap_or(0);
+
         for (idx, field) in fields.iter().enumerate() {
             let highlight = focused && idx == app.tab_field_indices[tab_index];
             let line_index = lines.len();
-            let (line, cursor_info) = field_line(app, field, highlight);
+            let (line, cursor_info) = field_line(app, field, highlight, label_width);
             if cursor.is_none() {
                 if let Some(column) = cursor_info {
                     cursor = Some((line_index, column));
@@ -725,8 +787,12 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let message: String = if app.alias_modal.is_some() {
         ADD_ALIAS_HELP.to_string()
-    } else if app.multivalue_modal().is_some() {
-        MULTIVALUE_HELP.to_string()
+    } else if let Some(modal) = app.multivalue_modal() {
+        if modal.field() == MultiValueField::Alias {
+            ALIAS_MODAL_HELP.to_string()
+        } else {
+            MULTIVALUE_HELP.to_string()
+        }
     } else if app.confirm_modal.is_some() {
         CONFIRM_HELP.to_string()
     } else if app.show_search {
@@ -825,7 +891,12 @@ fn build_tab_header(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn field_line(app: &App, field: &PaneField, highlight: bool) -> (Line<'static>, Option<usize>) {
+fn field_line(
+    app: &App,
+    field: &PaneField,
+    highlight: bool,
+    label_width: usize,
+) -> (Line<'static>, Option<usize>) {
     let editing = app.editor.active
         && field
             .source()
@@ -833,14 +904,15 @@ fn field_line(app: &App, field: &PaneField, highlight: bool) -> (Line<'static>, 
             .map(|(lhs, rhs)| lhs == *rhs)
             .unwrap_or(false);
     let (label_style, value_style) = line_styles(app, highlight || editing);
-    let label = format!("{}: ", field.label);
+    // Pad the label (including colon) to consistent width, then add space before value
+    let label = format!("{:width$} ", format!("{}:", field.label), width = label_width);
     let mut spans = vec![Span::styled(label.clone(), label_style)];
     let mut cursor = None;
 
     if editing {
         let value = app.editor.value().to_string();
-        let label_width = Span::raw(label).width();
-        let cursor_column = label_width + app.editor.visual_cursor();
+        let visual_label_width = Span::raw(&label).width();
+        let cursor_column = visual_label_width + app.editor.visual_cursor();
         cursor = Some(cursor_column);
         spans.push(Span::styled(value, value_style));
     } else {
@@ -924,12 +996,16 @@ fn render_centered_words(frame: &mut Frame<'_>, area: Rect, text: &str) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), target);
 }
 
-fn render_header_with_double_line(
+/// Render a header line with a separator below it.
+/// `area` is the inner content area for the header.
+/// `outer_width` is the full pane width (including borders) for drawing connected separators.
+fn render_header_with_separator(
     frame: &mut Frame<'_>,
     area: Rect,
     content: Line<'static>,
     app: &App,
     style: Option<Style>,
+    outer_width: u16,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -958,9 +1034,25 @@ fn render_header_with_double_line(
 
     frame.render_widget(paragraph, layout[0]);
 
-    let separator = "═".repeat(layout[1].width as usize);
+    // Build separator with connector characters: ├───┤
+    // The separator spans the full outer width to connect with side borders
+    let inner_width = outer_width.saturating_sub(2) as usize; // exclude border chars
+    let separator = format!(
+        "{}{}{}",
+        LINE.vertical_right,
+        LINE.horizontal.to_string().repeat(inner_width),
+        LINE.vertical_left
+    );
     let separator_line = Line::from(Span::styled(separator, separator_style(app)));
-    frame.render_widget(Paragraph::new(separator_line), layout[1]);
+    
+    // Render at the separator row, but shifted left by 1 to start at the border
+    let separator_area = Rect {
+        x: layout[1].x.saturating_sub(1),
+        y: layout[1].y,
+        width: outer_width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(separator_line), separator_area);
 }
 
 fn color(rgb: RgbColor) -> Color {

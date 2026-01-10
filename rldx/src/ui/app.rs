@@ -137,6 +137,7 @@ pub enum PaneFocus {
 pub enum MultiValueField {
     Email,
     Phone,
+    Alias,
 }
 
 impl MultiValueField {
@@ -144,6 +145,7 @@ impl MultiValueField {
         match name.to_ascii_uppercase().as_str() {
             "EMAIL" => Some(Self::Email),
             "TEL" => Some(Self::Phone),
+            "NICKNAME" => Some(Self::Alias),
             _ => None,
         }
     }
@@ -152,6 +154,7 @@ impl MultiValueField {
         match self {
             Self::Email => "EMAIL ADDRESSES",
             Self::Phone => "PHONE NUMBERS",
+            Self::Alias => "ALIASES",
         }
     }
 
@@ -159,6 +162,23 @@ impl MultiValueField {
         match self {
             Self::Email => "EMAIL",
             Self::Phone => "TEL",
+            Self::Alias => "NICKNAME",
+        }
+    }
+
+    /// Whether this field type supports a "type" label (e.g., "work", "home")
+    pub fn has_type_label(self) -> bool {
+        match self {
+            Self::Email | Self::Phone => true,
+            Self::Alias => false,
+        }
+    }
+
+    /// Whether this field type supports "set default" operation
+    pub fn has_default(self) -> bool {
+        match self {
+            Self::Email | Self::Phone => true,
+            Self::Alias => false,
         }
     }
 }
@@ -533,6 +553,7 @@ impl<'a> App<'a> {
         if self.key_matches_any(&key, &nav.add_alias) {
             if let Some(field) = self.focused_field() {
                 if field.label.eq_ignore_ascii_case("ALIAS") {
+                    self.modal_popup = PopupState::default();
                     self.alias_modal = Some(AliasModal { input: Input::default() });
                     self.set_status("Add alias");
                     return Ok(false);
@@ -698,6 +719,7 @@ impl<'a> App<'a> {
                         self.set_status("Mark at least 2 contacts to merge");
                         return Ok(true);
                     }
+                    self.modal_popup = PopupState::default();
                     self.confirm_modal = Some(ConfirmModal {
                         title: "MERGE CONTACTS".to_string(),
                         message: format!(
@@ -944,12 +966,49 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        // Modal: set default
+        // Modal: set default (only for fields that support it)
         if self.key_matches_any(&key, &modal_keys.set_default) {
             if let Some((field, item)) = self.current_modal_selection() {
-                if self.set_multivalue_default(field, item.seq)? {
-                    self.rebuild_multivalue_modal(field, None);
-                    self.set_status("Default updated");
+                if field.has_default() {
+                    if self.set_multivalue_default(field, item.seq)? {
+                        self.rebuild_multivalue_modal(field, None);
+                        self.set_status("Default updated");
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Modal: delete (only for Alias currently)
+        if self.key_matches_any(&key, &modal_keys.delete) {
+            if let Some((field, item)) = self.current_modal_selection() {
+                if field == MultiValueField::Alias {
+                    if self.delete_alias_entry(item.seq)? {
+                        self.rebuild_multivalue_modal(field, None);
+                        self.set_status("Alias deleted");
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Modal: add (only for Alias currently)
+        if self.key_matches_any(&key, &modal_keys.add) {
+            if let Some((field, _)) = self.current_modal_selection() {
+                if field == MultiValueField::Alias {
+                    // Close multivalue modal and open add-alias modal
+                    self.multivalue_modal = None;
+                    self.modal_popup = PopupState::default();
+                    self.alias_modal = Some(AliasModal { input: Input::default() });
+                    self.set_status("Add alias");
+                }
+            } else if let Some(modal) = &self.multivalue_modal {
+                // No items selected, but modal is open for Alias
+                if modal.field() == MultiValueField::Alias {
+                    self.multivalue_modal = None;
+                    self.modal_popup = PopupState::default();
+                    self.alias_modal = Some(AliasModal { input: Input::default() });
+                    self.set_status("Add alias");
                 }
             }
             return Ok(());
@@ -964,12 +1023,17 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        // Modal: confirm (also sets default, for Enter key)
+        // Modal: confirm (sets default for EMAIL/PHONE, closes for ALIAS)
         if self.key_matches_any(&key, &modal_keys.confirm) {
             if let Some((field, item)) = self.current_modal_selection() {
-                if self.set_multivalue_default(field, item.seq)? {
-                    self.rebuild_multivalue_modal(field, None);
-                    self.set_status("Default updated");
+                if field.has_default() {
+                    if self.set_multivalue_default(field, item.seq)? {
+                        self.rebuild_multivalue_modal(field, None);
+                        self.set_status("Default updated");
+                    }
+                } else {
+                    // For fields without default (Alias), just close the modal
+                    self.close_multivalue_modal();
                 }
             }
             return Ok(());
@@ -1052,23 +1116,33 @@ impl<'a> App<'a> {
             return false;
         };
 
-        let Some(source) = field.source() else {
-            return false;
+        // Determine the field kind - either from source or by label for ALIAS
+        let kind = if let Some(source) = field.source() {
+            MultiValueField::from_field_name(&source.field)
+        } else if field.label.eq_ignore_ascii_case("ALIAS") {
+            // ALIAS field without source (no existing aliases) - still allow opening
+            Some(MultiValueField::Alias)
+        } else {
+            None
         };
 
-        let Some(kind) = MultiValueField::from_field_name(&source.field) else {
+        let Some(kind) = kind else {
             return false;
         };
 
         let items = self.build_multivalue_items(kind);
-        if items.len() < 2 {
+
+        // For EMAIL/PHONE, require at least 2 items to open modal
+        // For ALIAS, allow opening even with 0 items (to add new aliases)
+        if kind != MultiValueField::Alias && items.len() < 2 {
             return false;
         }
 
-        let selected = items
-            .iter()
-            .position(|item| item.seq == source.seq)
+        let selected = field
+            .source()
+            .and_then(|source| items.iter().position(|item| item.seq == source.seq))
             .unwrap_or(0);
+        self.modal_popup = PopupState::default();
         self.multivalue_modal = Some(MultiValueModal::new(kind, items, selected));
         true
     }
@@ -1083,6 +1157,7 @@ impl<'a> App<'a> {
         let selected = selected_seq
             .and_then(|seq| items.iter().position(|item| item.seq == seq))
             .unwrap_or(0);
+        self.modal_popup = PopupState::default();
         self.multivalue_modal = Some(MultiValueModal::new(field, items, selected));
     }
 
@@ -1094,8 +1169,11 @@ impl<'a> App<'a> {
             .iter()
             .filter(|prop| prop.field.eq_ignore_ascii_case(field_name))
             .map(|prop| {
-                let type_label =
-                    extract_type_labels(&prop.params).unwrap_or_else(|| "—".to_string());
+                let type_label = if field.has_type_label() {
+                    extract_type_labels(&prop.params).unwrap_or_else(|| "—".to_string())
+                } else {
+                    String::new()
+                };
                 let (value, copy_value) = match field {
                     MultiValueField::Email => {
                         let trimmed = prop.value.trim().to_string();
@@ -1104,6 +1182,10 @@ impl<'a> App<'a> {
                     MultiValueField::Phone => {
                         let display = vcard_io::phone_display_value(&prop.value, default_region);
                         (display.clone(), display)
+                    }
+                    MultiValueField::Alias => {
+                        let trimmed = prop.value.trim().to_string();
+                        (trimmed.clone(), trimmed)
                     }
                 };
                 MultiValueItem {
@@ -1579,6 +1661,60 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn delete_alias_entry(&mut self, seq: i64) -> Result<bool> {
+        if seq < 0 {
+            self.set_status("Unable to delete alias");
+            return Ok(false);
+        }
+
+        let idx = match usize::try_from(seq) {
+            Ok(value) => value,
+            Err(_) => {
+                self.set_status("Unable to delete alias");
+                return Ok(false);
+            }
+        };
+
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(false);
+        };
+
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let mut cards = parsed.cards;
+        if cards.is_empty() {
+            self.set_status("Contact has no cards");
+            return Ok(false);
+        }
+
+        let deleted = {
+            let card = cards.get_mut(0).unwrap();
+            vcard_io::delete_nickname_entry(card, idx)
+        };
+
+        if !deleted {
+            self.set_status("Unable to delete alias");
+            return Ok(false);
+        }
+
+        vcard_io::write_cards(&contact.path, &cards)?;
+
+        let card_clone = cards[0].clone();
+        let state = vdir::compute_file_state(&contact.path)?;
+        let record = indexer::build_record(&contact.path, &card_clone, &state, None)?;
+        self.db.upsert(&record.item, &record.props)?;
+
+        // Refresh and keep focus stable
+        let previous_index = self.card_field_index;
+        self.refresh_contacts()?;
+        if !self.card_fields.is_empty() {
+            let max_index = self.card_fields.len().saturating_sub(1);
+            self.card_field_index = previous_index.min(max_index);
+        }
+
+        Ok(true)
+    }
+
     fn commit_field_edit(&mut self, target: FieldRef, new_value: String) -> Result<()> {
         let Some(contact) = &self.current_contact else {
             self.set_status("No contact selected");
@@ -1657,6 +1793,10 @@ impl<'a> App<'a> {
             match field {
                 MultiValueField::Email => vcard_io::promote_email_entry(card, idx),
                 MultiValueField::Phone => vcard_io::promote_tel_entry(card, idx),
+                MultiValueField::Alias => {
+                    // Aliases don't have a "default" concept
+                    return Ok(false);
+                }
             }
         };
 
@@ -1924,6 +2064,14 @@ impl<'a> App<'a> {
                         action: "Set Default",
                         keys: keys.modal.set_default.join(", "),
                     },
+                    HelpEntry {
+                        action: "Delete",
+                        keys: keys.modal.delete.join(", "),
+                    },
+                    HelpEntry {
+                        action: "Add",
+                        keys: keys.modal.add.join(", "),
+                    },
                 ],
             },
             HelpSection {
@@ -1957,6 +2105,7 @@ impl<'a> App<'a> {
     /// Open the help modal
     pub fn show_help(&mut self) {
         let total_lines = self.help_total_lines();
+        self.modal_popup = PopupState::default();
         self.help_modal = Some(HelpModal::new(total_lines));
     }
 
@@ -2302,6 +2451,9 @@ where
         aliases.join("/")
     };
 
+    let first_nickname = props.iter().find(|p| p.field == "NICKNAME");
+    let total_nickname_count = props.iter().filter(|p| p.field == "NICKNAME").count();
+
     let first_phone = props.iter().find(|p| p.field == "TEL");
     let total_phone_count = props.iter().filter(|p| p.field == "TEL").count();
     let first_email = props.iter().find(|p| p.field == "EMAIL");
@@ -2387,7 +2539,27 @@ where
                     }
                 }
             }
-            "alias" => fields.push(PaneField::new("ALIAS", alias_value.clone())),
+            "alias" => {
+                // Show alias field even if empty (allows adding new aliases)
+                if let Some(prop) = first_nickname {
+                    let display_value = if total_nickname_count > 1 {
+                        format!("{} [{}]", alias_value, total_nickname_count)
+                    } else {
+                        alias_value.clone()
+                    };
+                    fields.push(PaneField::from_prop(
+                        "ALIAS",
+                        display_value,
+                        alias_value.clone(),
+                        "NICKNAME",
+                        prop.seq,
+                        None,
+                    ));
+                } else {
+                    // No aliases exist yet - show placeholder without source
+                    fields.push(PaneField::new("ALIAS", alias_value.clone()));
+                }
+            }
             "phone" => {
                 if let Some(prop) = first_phone {
                     let label = "PHONE".to_string();
