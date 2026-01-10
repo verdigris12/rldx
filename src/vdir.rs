@@ -194,6 +194,7 @@ pub(crate) fn existing_stems(vdir: &Path) -> Result<HashSet<String>> {
     Ok(stems)
 }
 
+#[allow(dead_code)] // Used once full encryption integration is complete
 pub(crate) fn existing_stems_with_encryption(vdir: &Path, encryption_type: EncryptionType) -> Result<HashSet<String>> {
     let mut stems = HashSet::new();
     let mut files = list_vcf_files_with_encryption(vdir, encryption_type)?;
@@ -233,6 +234,7 @@ fn collect_all_vcf(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 /// List vCard files for a specific encryption type
+#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn list_vcf_files_with_encryption(root: &Path, encryption_type: EncryptionType) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     collect_vcf(root, &mut files, encryption_type)?;
@@ -240,6 +242,7 @@ pub fn list_vcf_files_with_encryption(root: &Path, encryption_type: EncryptionTy
 }
 
 /// Check if a file matches the expected vCard extension for the given encryption type
+#[allow(dead_code)] // Used once full encryption integration is complete
 fn is_vcf_file(path: &Path, encryption_type: EncryptionType) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let name_lower = name.to_ascii_lowercase();
@@ -268,6 +271,7 @@ pub fn vcf_base_stem(path: &Path) -> Option<String> {
     None
 }
 
+#[allow(dead_code)] // Used once full encryption integration is complete
 fn collect_vcf(dir: &Path, files: &mut Vec<PathBuf>, encryption_type: EncryptionType) -> Result<()> {
     for entry in
         fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?
@@ -377,6 +381,7 @@ pub fn write_atomic(target: &Path, data: &[u8]) -> Result<()> {
 // =============================================================================
 
 /// Read a vCard file, decrypting if necessary
+#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn read_vcf_file(path: &Path, provider: &dyn CryptoProvider) -> Result<String> {
     let data = fs::read(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -390,6 +395,7 @@ pub fn read_vcf_file(path: &Path, provider: &dyn CryptoProvider) -> Result<Strin
 }
 
 /// Write a vCard file, encrypting if necessary
+#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn write_vcf_file(path: &Path, data: &[u8], provider: &dyn CryptoProvider) -> Result<()> {
     let encrypted = provider.encrypt(data)
         .with_context(|| format!("failed to encrypt data for {}", path.display()))?;
@@ -398,6 +404,7 @@ pub fn write_vcf_file(path: &Path, data: &[u8], provider: &dyn CryptoProvider) -
 }
 
 /// Get the target path for a vCard file with the correct extension
+#[allow(dead_code)] // Used once full encryption integration is complete
 pub fn vcf_target_path(vdir: &Path, stem: &str, encryption_type: EncryptionType) -> PathBuf {
     let extension = match encryption_type {
         EncryptionType::Gpg => "vcf.gpg",

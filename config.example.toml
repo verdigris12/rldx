@@ -13,9 +13,9 @@ vdir = "/path/to/your/vdir"
 
 [top_bar]
 F1 = "help"
-F3 = "edit"
-F5 = "refresh"
-F7 = "share"
+F2 = "edit"
+F3 = "refresh"
+F4 = "share"
 
 # Optional: override which fields appear in the first pane.
 # fields_first_pane = ["fname", "mname", "lname", "alias", "phone", "email"]
