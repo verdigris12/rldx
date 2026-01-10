@@ -22,7 +22,7 @@ use tui_widgets::popup::PopupState;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 
-use crate::config::{CommandExec, Config, UiColors};
+use crate::config::{CommandExec, Config, TopBarAction, UiColors};
 use crate::db::{ContactItem, ContactListEntry, Database, PropRow};
 use crate::indexer;
 use crate::search;
@@ -213,6 +213,19 @@ pub struct HelpModal {
     pub viewport_height: usize,
 }
 
+/// Reindex modal (blocking during reindex operation)
+#[derive(Debug, Clone)]
+pub struct ReindexModal {
+    pub message: String,
+}
+
+/// Share modal with QR code
+#[derive(Debug, Clone)]
+pub struct ShareModal {
+    /// QR code rendered as lines of Unicode characters
+    pub qr_lines: Vec<String>,
+}
+
 impl HelpModal {
     pub fn new(total_lines: usize) -> Self {
         Self {
@@ -355,6 +368,12 @@ pub struct App<'a> {
     pub alias_modal: Option<AliasModal>,
     // Help modal (F1)
     pub help_modal: Option<HelpModal>,
+    // Reindex modal (blocking)
+    pub reindex_modal: Option<ReindexModal>,
+    // Share modal with QR code
+    pub share_modal: Option<ShareModal>,
+    // Flag to trigger reindex from event loop
+    pub pending_reindex: bool,
 }
 
 impl<'a> App<'a> {
@@ -393,6 +412,9 @@ impl<'a> App<'a> {
             confirm_modal: None,
             alias_modal: None,
             help_modal: None,
+            reindex_modal: None,
+            share_modal: None,
+            pending_reindex: false,
         };
         app.rebuild_search_rows();
         app.load_selection()?;
@@ -423,6 +445,20 @@ impl<'a> App<'a> {
         loop {
             draw::render(terminal, self)?;
 
+            // Handle pending reindex (shows blocking modal)
+            if self.pending_reindex {
+                self.pending_reindex = false;
+                self.reindex_modal = Some(ReindexModal {
+                    message: "REINDEXING...".to_string(),
+                });
+                draw::render(terminal, self)?; // Show the modal
+                self.perform_reindex()?;
+                self.reindex_modal = None;
+                self.refresh_contacts()?;
+                self.set_status("Reindex complete");
+                continue;
+            }
+
             if event::poll(Duration::from_millis(250))? {
                 match event::read()? {
                     Event::Key(key) => {
@@ -446,16 +482,27 @@ impl<'a> App<'a> {
             return Ok(true);
         }
 
-        // F1 always opens help (hardcoded)
-        if matches!(key.code, KeyCode::F(1)) {
-            self.show_help();
-            return Ok(false);
-        }
-
         // If help modal is open, handle its keys first
         if self.help_modal.is_some() {
             self.handle_help_modal_key(key);
             return Ok(false);
+        }
+
+        // If share modal is open, handle its keys
+        if self.share_modal.is_some() {
+            self.handle_share_modal_key(key);
+            return Ok(false);
+        }
+
+        // Check top bar buttons (work in any context except modals/editor)
+        if self.confirm_modal.is_none()
+            && self.alias_modal.is_none()
+            && self.multivalue_modal.is_none()
+            && !self.editor.active
+        {
+            if let Some(action) = self.top_bar_action_for_key(&key) {
+                return self.handle_top_bar_action(action);
+            }
         }
 
         // Route to context-specific handlers first
@@ -1567,6 +1614,10 @@ impl<'a> App<'a> {
         &self.config.ui.colors
     }
 
+    pub fn top_bar_buttons(&self) -> &[crate::config::TopBarButton] {
+        &self.config.top_bar.buttons
+    }
+
     pub fn image_pane_width(&self) -> u16 {
         self.config.ui.pane.image.width
     }
@@ -2149,6 +2200,157 @@ impl<'a> App<'a> {
                 modal.scroll_to_bottom();
             }
             _ => {}
+        }
+    }
+
+    // =========================================================================
+    // Top Bar Actions
+    // =========================================================================
+
+    /// Check if a key event matches a top bar button and return its action
+    fn top_bar_action_for_key(&self, key: &KeyEvent) -> Option<TopBarAction> {
+        for button in &self.config.top_bar.buttons {
+            if self.key_matches_function_key(key, &button.key) {
+                return Some(button.action);
+            }
+        }
+        None
+    }
+
+    fn key_matches_function_key(&self, event: &KeyEvent, key_name: &str) -> bool {
+        let code = match key_name.to_ascii_uppercase().as_str() {
+            "F1" => KeyCode::F(1),
+            "F2" => KeyCode::F(2),
+            "F3" => KeyCode::F(3),
+            "F4" => KeyCode::F(4),
+            "F5" => KeyCode::F(5),
+            "F6" => KeyCode::F(6),
+            "F7" => KeyCode::F(7),
+            "F8" => KeyCode::F(8),
+            "F9" => KeyCode::F(9),
+            "F10" => KeyCode::F(10),
+            "F11" => KeyCode::F(11),
+            "F12" => KeyCode::F(12),
+            _ => return false,
+        };
+        event.code == code
+    }
+
+    fn handle_top_bar_action(&mut self, action: TopBarAction) -> Result<bool> {
+        match action {
+            TopBarAction::Help => {
+                self.show_help();
+                Ok(false)
+            }
+            TopBarAction::Edit => {
+                // No-op for now - will implement full editor later
+                Ok(false)
+            }
+            TopBarAction::Refresh => {
+                // Set flag to trigger reindex in event loop (allows showing blocking modal)
+                self.pending_reindex = true;
+                Ok(false)
+            }
+            TopBarAction::Share => {
+                self.show_share_modal()?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Perform the actual reindex operation
+    fn perform_reindex(&mut self) -> Result<()> {
+        let files = vdir::list_vcf_files(&self.config.vdir)?;
+        let paths_set: HashSet<_> = files.iter().cloned().collect();
+
+        // Force full reindex
+        self.db.reset_schema()?;
+
+        for path in files {
+            let state = vdir::compute_file_state(&path)?;
+            let parsed = vcard_io::parse_file(&path, self.config.phone_region.as_deref())?;
+            let cards = parsed.cards;
+
+            if cards.is_empty() {
+                continue;
+            }
+
+            let final_state = if parsed.changed {
+                vdir::compute_file_state(&path)?
+            } else {
+                state
+            };
+
+            let card = cards.into_iter().next().unwrap();
+            let record = indexer::build_record(&path, &card, &final_state, None)?;
+            self.db.upsert(&record.item, &record.props)?;
+        }
+
+        self.db.remove_missing(&paths_set)?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Share Modal (QR Code)
+    // =========================================================================
+
+    fn show_share_modal(&mut self) -> Result<()> {
+        use qrcode::{QrCode, render::unicode};
+
+        let Some(contact) = &self.current_contact else {
+            self.set_status("No contact selected");
+            return Ok(());
+        };
+
+        // Parse the vCard file to get full card data
+        let parsed = vcard_io::parse_file(&contact.path, self.config.phone_region.as_deref())?;
+        let Some(mut card) = parsed.cards.into_iter().next() else {
+            self.set_status("Unable to load contact");
+            return Ok(());
+        };
+
+        // Remove PHOTO data to keep QR code manageable
+        card.photo.clear();
+        card.logo.clear();
+
+        // Serialize to vCard string
+        let vcard_string = card.to_string();
+
+        // Check if data is too large for QR code (max ~2953 bytes for alphanumeric)
+        if vcard_string.len() > 2500 {
+            self.set_status("Contact data too large for QR code");
+            return Ok(());
+        }
+
+        // Generate QR code
+        let code = match QrCode::new(vcard_string.as_bytes()) {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_status(format!("QR generation failed: {}", e));
+                return Ok(());
+            }
+        };
+
+        // Render to Unicode using half-blocks for compact display
+        // Dark modules rendered as Dark (will be colored), light as Light (background)
+        let qr_string = code
+            .render::<unicode::Dense1x2>()
+            .dark_color(unicode::Dense1x2::Dark)
+            .light_color(unicode::Dense1x2::Light)
+            .build();
+
+        let qr_lines: Vec<String> = qr_string.lines().map(|s| s.to_string()).collect();
+
+        self.modal_popup = PopupState::default();
+        self.share_modal = Some(ShareModal { qr_lines });
+
+        Ok(())
+    }
+
+    fn handle_share_modal_key(&mut self, key: KeyEvent) {
+        // Close on Escape or q
+        if matches!(key.code, KeyCode::Esc) || matches!(key.code, KeyCode::Char('q')) {
+            self.share_modal = None;
         }
     }
 }

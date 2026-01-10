@@ -19,6 +19,81 @@ pub struct Config {
     pub keys: Keys,
     pub ui: UiConfig,
     pub commands: Commands,
+    pub top_bar: TopBarConfig,
+}
+
+// =============================================================================
+// Top Bar Configuration
+// =============================================================================
+
+/// Actions available for top bar buttons
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopBarAction {
+    Help,
+    Edit,
+    Refresh,
+    Share,
+}
+
+impl TopBarAction {
+    /// Display title for the button
+    pub fn title(&self) -> &'static str {
+        match self {
+            TopBarAction::Help => "HELP",
+            TopBarAction::Edit => "EDIT",
+            TopBarAction::Refresh => "REFRESH",
+            TopBarAction::Share => "SHARE",
+        }
+    }
+
+    /// Parse from string (case-insensitive)
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "help" => Some(TopBarAction::Help),
+            "edit" => Some(TopBarAction::Edit),
+            "refresh" => Some(TopBarAction::Refresh),
+            "share" => Some(TopBarAction::Share),
+            _ => None,
+        }
+    }
+}
+
+/// A single top bar button
+#[derive(Debug, Clone)]
+pub struct TopBarButton {
+    pub key: String,
+    pub action: TopBarAction,
+}
+
+impl TopBarButton {
+    /// Get the function key number (1-12) or None if invalid
+    pub fn function_key_number(&self) -> Option<u8> {
+        let upper = self.key.to_ascii_uppercase();
+        if upper.starts_with('F') {
+            upper[1..].parse::<u8>().ok().filter(|&n| n >= 1 && n <= 12)
+        } else {
+            None
+        }
+    }
+}
+
+/// Top bar configuration
+#[derive(Debug, Clone)]
+pub struct TopBarConfig {
+    pub buttons: Vec<TopBarButton>,
+}
+
+impl Default for TopBarConfig {
+    fn default() -> Self {
+        Self {
+            buttons: vec![
+                TopBarButton { key: "F1".into(), action: TopBarAction::Help },
+                TopBarButton { key: "F3".into(), action: TopBarAction::Edit },
+                TopBarButton { key: "F5".into(), action: TopBarAction::Refresh },
+                TopBarButton { key: "F7".into(), action: TopBarAction::Share },
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -681,6 +756,8 @@ struct ConfigFile {
     ui: UiFile,
     #[serde(default)]
     commands: CommandsFile,
+    #[serde(default)]
+    top_bar: TopBarFile,
 }
 
 impl Default for ConfigFile {
@@ -692,6 +769,68 @@ impl Default for ConfigFile {
             keys: KeysFile::default(),
             ui: UiFile::default(),
             commands: CommandsFile::default(),
+            top_bar: TopBarFile::default(),
+        }
+    }
+}
+
+// =============================================================================
+// Top Bar File Deserialization
+// =============================================================================
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct TopBarFile {
+    #[serde(flatten)]
+    buttons: HashMap<String, String>,
+}
+
+impl From<TopBarFile> for TopBarConfig {
+    fn from(file: TopBarFile) -> Self {
+        if file.buttons.is_empty() {
+            return TopBarConfig::default();
+        }
+
+        let mut buttons: Vec<TopBarButton> = Vec::new();
+
+        for (key, action_str) in file.buttons {
+            // Validate key is F1-F12
+            let upper_key = key.to_ascii_uppercase();
+            if !upper_key.starts_with('F') {
+                eprintln!("warning: invalid top_bar key '{}', expected F1-F12", key);
+                continue;
+            }
+            let num: Option<u8> = upper_key[1..].parse().ok();
+            match num {
+                Some(n) if n >= 1 && n <= 12 => {}
+                _ => {
+                    eprintln!("warning: invalid top_bar key '{}', expected F1-F12", key);
+                    continue;
+                }
+            }
+
+            // Validate action
+            let Some(action) = TopBarAction::from_str(&action_str) else {
+                eprintln!(
+                    "warning: invalid top_bar action '{}' for key '{}', expected one of: help, edit, refresh, share",
+                    action_str, key
+                );
+                continue;
+            };
+
+            buttons.push(TopBarButton {
+                key: upper_key,
+                action,
+            });
+        }
+
+        // Sort by function key number
+        buttons.sort_by_key(|b| b.function_key_number().unwrap_or(0));
+
+        if buttons.is_empty() {
+            TopBarConfig::default()
+        } else {
+            TopBarConfig { buttons }
         }
     }
 }
@@ -776,6 +915,7 @@ pub fn load() -> Result<Config> {
         keys,
         ui: cfg_file.ui.into(),
         commands: cfg_file.commands.into(),
+        top_bar: cfg_file.top_bar.into(),
     })
 }
 
@@ -795,6 +935,7 @@ fn warn_unknown_keys(value: &toml::Value) {
         "keys".to_string(),
         "ui".to_string(),
         "commands".to_string(),
+        "top_bar".to_string(),
     ]);
 
     for key in table.keys() {

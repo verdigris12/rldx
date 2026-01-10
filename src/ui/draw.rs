@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ratatui::backend::Backend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
@@ -12,7 +12,7 @@ use ratatui_image::{Resize, StatefulImage};
 // Use Popup from tui-widgets to render modals
 use tui_widgets::popup::Popup;
 
-use crate::config::RgbColor;
+use crate::config::{RgbColor, TopBarButton};
 
 use super::app::{App, MultiValueField, PaneField, PaneFocus, SearchFocus, SearchRow};
 use super::panes::DetailTab;
@@ -49,9 +49,32 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App) {
     draw_multivalue_modal(frame, size, app);
     draw_confirm_modal(frame, size, app);
     draw_help_modal(frame, size, app);
+    draw_reindex_modal(frame, size, app);
+    draw_share_modal(frame, size, app);
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    // Calculate button area width
+    let buttons = app.top_bar_buttons();
+    let total_buttons_width = calculate_buttons_width(buttons);
+
+    // Split area: left for path/languages, right for buttons
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(total_buttons_width),
+        ])
+        .split(area);
+
+    // Draw path/languages on left
+    draw_header_left(frame, chunks[0], app);
+
+    // Draw buttons on right
+    draw_top_bar_buttons(frame, chunks[1], app);
+}
+
+fn draw_header_left(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let header_style = header_text_style(app);
     let mut spans: Vec<Span> = Vec::new();
 
@@ -89,6 +112,91 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn calculate_buttons_width(buttons: &[TopBarButton]) -> u16 {
+    if buttons.is_empty() {
+        return 0;
+    }
+
+    // Find longest title
+    let max_title_len = buttons
+        .iter()
+        .map(|b| b.action.title().len())
+        .max()
+        .unwrap_or(0);
+
+    // Format: " F1: TITLE " = 1 (space) + key.len() + 2 (": ") + title + 1 (space)
+    // Keys are F1-F12, so 2-3 chars. Use 3 for consistency.
+    let button_width = (1 + 3 + 2 + max_title_len + 1) as u16;
+
+    // Total: button_width * count + separators (1 space between each button)
+    let num_buttons = buttons.len() as u16;
+    let separators = num_buttons.saturating_sub(1);
+    button_width * num_buttons + separators
+}
+
+fn draw_top_bar_buttons(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let buttons = app.top_bar_buttons();
+    if buttons.is_empty() || area.width == 0 {
+        return;
+    }
+
+    let max_title_len = buttons
+        .iter()
+        .map(|b| b.action.title().len())
+        .max()
+        .unwrap_or(0);
+
+    // Each button: " F1: TITLE "
+    let button_content_width = (1 + 3 + 2 + max_title_len + 1) as u16;
+
+    let colors = app.ui_colors();
+    let button_style = Style::default()
+        .fg(color(colors.selection_fg))
+        .bg(color(colors.selection_bg))
+        .add_modifier(Modifier::BOLD);
+
+    let mut x = area.x;
+    for (idx, button) in buttons.iter().enumerate() {
+        if x + button_content_width > area.x + area.width {
+            break;
+        }
+
+        // Format: " F1: TITLE " with title padded to max_title_len, centered
+        let text = format!(
+            " {}: {:^width$} ",
+            button.key,
+            button.action.title(),
+            width = max_title_len
+        );
+
+        let button_area = Rect {
+            x,
+            y: area.y,
+            width: button_content_width,
+            height: 1,
+        };
+
+        frame.render_widget(
+            Paragraph::new(text).style(button_style).alignment(Alignment::Center),
+            button_area,
+        );
+
+        x += button_content_width;
+
+        // Add separator space (with default/background style) between buttons
+        if idx < buttons.len() - 1 && x < area.x + area.width {
+            let sep_area = Rect {
+                x,
+                y: area.y,
+                width: 1,
+                height: 1,
+            };
+            frame.render_widget(Paragraph::new(" "), sep_area);
+            x += 1;
+        }
+    }
 }
 
 fn draw_body(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -629,6 +737,87 @@ fn draw_help_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     // Render the content as a paragraph
     let paragraph = Paragraph::new(visible_lines);
+    frame.render_widget(paragraph, inner);
+}
+
+fn draw_reindex_modal(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(modal) = &app.reindex_modal else {
+        return;
+    };
+
+    let width = 30u16.min(area.width);
+    let height = 3u16.min(area.height);
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style(app, true));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let text = Paragraph::new(modal.message.clone())
+        .alignment(Alignment::Center)
+        .style(header_text_style(app));
+    frame.render_widget(text, inner);
+}
+
+fn draw_share_modal(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(modal) = &app.share_modal else {
+        return;
+    };
+
+    let qr_width = modal
+        .qr_lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let qr_height = modal.qr_lines.len() as u16;
+
+    // Add padding for borders and title/footer
+    let width = (qr_width + 4).min(area.width);
+    let height = (qr_height + 4).min(area.height); // +2 for borders, +2 for title/footer
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let title = Line::from(Span::styled(" SHARE ", header_text_style(app)));
+    let footer = Line::from(Span::styled(" Esc: close ", header_text_style(app)));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style(app, true))
+        .title(title)
+        .title_bottom(footer)
+        .title_alignment(Alignment::Center);
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Render QR code lines - invert the rendering so dark modules are selection color
+    // The QR was rendered with Light for dark and Dark for light, so we need to swap
+    // by using selection_bg as background and default as foreground
+    let colors = app.ui_colors();
+    let qr_style = Style::default()
+        .fg(color(colors.selection_bg))
+        .bg(Color::Reset);
+
+    let qr_text: Vec<Line> = modal
+        .qr_lines
+        .iter()
+        .map(|l| Line::from(Span::styled(l.clone(), qr_style)))
+        .collect();
+
+    let paragraph = Paragraph::new(qr_text).alignment(Alignment::Center);
     frame.render_widget(paragraph, inner);
 }
 
