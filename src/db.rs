@@ -79,7 +79,17 @@ pub struct Database {
 }
 
 impl Database {
+    /// Open the database without encryption
     pub fn open() -> Result<Self> {
+        Self::open_with_key(None)
+    }
+
+    /// Open the database with optional SQLCipher encryption key
+    ///
+    /// The key should be in SQLCipher PRAGMA key format:
+    /// - Empty string for no encryption
+    /// - `x'<hex>'` for raw key bytes (e.g., `x'2DD29CA851E7B56E4697B0E1F08507293D761A05CE4D1B628663F411A8086D99'`)
+    pub fn open_with_key(encryption_key: Option<&str>) -> Result<Self> {
         let base = BaseDirs::new().context("unable to determine data directories")?;
         let data_dir = base.data_dir().join("rldx");
         fs::create_dir_all(&data_dir)?;
@@ -87,8 +97,43 @@ impl Database {
         let conn = Connection::open(&db_path)?;
 
         let mut db = Self { conn };
+
+        // Apply SQLCipher encryption key if provided
+        if let Some(key) = encryption_key {
+            if !key.is_empty() {
+                db.apply_encryption_key(key)?;
+            }
+        }
+
         db.setup()?;
         Ok(db)
+    }
+
+    /// Apply SQLCipher encryption key to the database
+    ///
+    /// This must be called immediately after opening the connection,
+    /// before any other operations.
+    fn apply_encryption_key(&mut self, key: &str) -> Result<()> {
+        // SQLCipher requires PRAGMA key to be set first, before any other operations
+        // The key format should be: x'<hex>' for raw bytes or 'passphrase' for string
+        self.conn
+            .pragma_update(None, "key", key)
+            .context("failed to set SQLCipher encryption key")?;
+
+        // Verify the key is correct by trying to read from the database
+        // This will fail with "file is not a database" if the key is wrong
+        let result = self.conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()));
+        if let Err(e) = result {
+            let err_str = e.to_string();
+            if err_str.contains("not a database") || err_str.contains("file is encrypted") {
+                anyhow::bail!(
+                    "failed to decrypt database - wrong encryption key or database is not encrypted"
+                );
+            }
+            // Other errors might be OK (e.g., no tables yet)
+        }
+
+        Ok(())
     }
 
     fn setup(&mut self) -> Result<()> {

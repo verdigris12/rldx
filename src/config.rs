@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use directories::BaseDirs;
@@ -21,6 +21,117 @@ pub struct Config {
     pub commands: Commands,
     pub top_bar: TopBarConfig,
     pub maildir_import: MaildirImportConfig,
+    pub encryption: EncryptionConfig,
+}
+
+// =============================================================================
+// Encryption Configuration
+// =============================================================================
+
+/// Encryption backend type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EncryptionType {
+    /// No encryption (plaintext storage)
+    #[default]
+    None,
+    /// GPG encryption (uses gpg-agent for key management)
+    Gpg,
+    /// Age encryption (modern, simpler alternative to GPG)
+    Age,
+}
+
+impl EncryptionType {
+    /// Parse from string (case-insensitive)
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(EncryptionType::None),
+            "gpg" => Some(EncryptionType::Gpg),
+            "age" => Some(EncryptionType::Age),
+            _ => None,
+        }
+    }
+
+    /// File extension for encrypted vCard files
+    pub fn vcf_extension(&self) -> &'static str {
+        match self {
+            EncryptionType::None => "vcf",
+            EncryptionType::Gpg => "vcf.gpg",
+            EncryptionType::Age => "vcf.age",
+        }
+    }
+
+    /// Check if encryption is enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, EncryptionType::None)
+    }
+}
+
+/// Encryption configuration
+#[derive(Debug, Clone)]
+pub struct EncryptionConfig {
+    /// Encryption backend type
+    pub encryption_type: EncryptionType,
+    /// GPG key ID for encryption (required if type = "gpg")
+    pub gpg_key_id: Option<String>,
+    /// Path to age identity file (required if type = "age")
+    pub age_identity: Option<PathBuf>,
+    /// Age recipient public key (required if type = "age")
+    pub age_recipient: Option<String>,
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self {
+            encryption_type: EncryptionType::None,
+            gpg_key_id: None,
+            age_identity: None,
+            age_recipient: None,
+        }
+    }
+}
+
+impl EncryptionConfig {
+    /// Validate the encryption configuration
+    pub fn validate(&self) -> Result<()> {
+        match self.encryption_type {
+            EncryptionType::None => Ok(()),
+            EncryptionType::Gpg => {
+                if self.gpg_key_id.is_none() {
+                    bail!("encryption.gpg_key_id is required when encryption.type = \"gpg\"");
+                }
+                Ok(())
+            }
+            EncryptionType::Age => {
+                if self.age_identity.is_none() {
+                    bail!("encryption.age_identity is required when encryption.type = \"age\"");
+                }
+                if self.age_recipient.is_none() {
+                    bail!("encryption.age_recipient is required when encryption.type = \"age\"");
+                }
+                // Validate identity file exists
+                if let Some(ref path) = self.age_identity {
+                    let expanded = expand_tilde(path);
+                    if !expanded.exists() {
+                        bail!(
+                            "age identity file does not exist: {}",
+                            expanded.display()
+                        );
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Expand ~ to home directory in paths
+fn expand_tilde(path: &Path) -> PathBuf {
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = home::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    path.to_path_buf()
 }
 
 // =============================================================================
@@ -902,6 +1013,8 @@ struct ConfigFile {
     top_bar: TopBarFile,
     #[serde(default)]
     maildir_import: MaildirImportFile,
+    #[serde(default)]
+    encryption: EncryptionFile,
 }
 
 impl Default for ConfigFile {
@@ -915,6 +1028,7 @@ impl Default for ConfigFile {
             commands: CommandsFile::default(),
             top_bar: TopBarFile::default(),
             maildir_import: MaildirImportFile::default(),
+            encryption: EncryptionFile::default(),
         }
     }
 }
@@ -1022,6 +1136,60 @@ impl From<MaildirImportFile> for MaildirImportConfig {
     }
 }
 
+// =============================================================================
+// Encryption File Deserialization
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct EncryptionFile {
+    #[serde(rename = "type")]
+    encryption_type: Option<String>,
+    gpg_key_id: Option<String>,
+    age_identity: Option<String>,
+    age_recipient: Option<String>,
+}
+
+impl Default for EncryptionFile {
+    fn default() -> Self {
+        Self {
+            encryption_type: None,
+            gpg_key_id: None,
+            age_identity: None,
+            age_recipient: None,
+        }
+    }
+}
+
+impl EncryptionFile {
+    fn into_config(self) -> Result<EncryptionConfig> {
+        let encryption_type = match self.encryption_type.as_deref() {
+            None | Some("none") => EncryptionType::None,
+            Some("gpg") => EncryptionType::Gpg,
+            Some("age") => EncryptionType::Age,
+            Some(other) => bail!(
+                "invalid encryption.type '{}', expected one of: none, gpg, age",
+                other
+            ),
+        };
+
+        let age_identity = self.age_identity.map(|s| {
+            let path = PathBuf::from(&s);
+            expand_tilde(&path)
+        });
+
+        let config = EncryptionConfig {
+            encryption_type,
+            gpg_key_id: self.gpg_key_id,
+            age_identity,
+            age_recipient: self.age_recipient,
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 fn default_fields_first_pane() -> Vec<String> {
     vec![
         "fname".to_string(),
@@ -1094,6 +1262,12 @@ pub fn load() -> Result<Config> {
     // Validate key bindings for collisions
     validate_key_bindings(&keys)?;
 
+    // Parse and validate encryption config
+    let encryption = cfg_file
+        .encryption
+        .into_config()
+        .with_context(|| "failed to parse encryption configuration")?;
+
     Ok(Config {
         config_path: path,
         vdir,
@@ -1104,6 +1278,7 @@ pub fn load() -> Result<Config> {
         commands: cfg_file.commands.into(),
         top_bar: cfg_file.top_bar.into(),
         maildir_import: cfg_file.maildir_import.into(),
+        encryption,
     })
 }
 
@@ -1125,6 +1300,7 @@ fn warn_unknown_keys(value: &toml::Value) {
         "commands".to_string(),
         "top_bar".to_string(),
         "maildir_import".to_string(),
+        "encryption".to_string(),
     ]);
 
     for key in table.keys() {
@@ -1147,6 +1323,10 @@ fn warn_unknown_keys(value: &toml::Value) {
 
     if let Some(maildir_import_val) = table.get("maildir_import") {
         warn_unknown_maildir_import_keys(maildir_import_val);
+    }
+
+    if let Some(encryption_val) = table.get("encryption") {
+        warn_unknown_encryption_keys(encryption_val);
     }
 }
 
@@ -1353,6 +1533,23 @@ fn warn_unknown_maildir_import_keys(value: &toml::Value) {
     for key in table.keys() {
         if !known.contains(key) {
             eprintln!("warning: unknown maildir_import entry `{}`", key);
+        }
+    }
+}
+
+fn warn_unknown_encryption_keys(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from([
+        "type".to_string(),
+        "gpg_key_id".to_string(),
+        "age_identity".to_string(),
+        "age_recipient".to_string(),
+    ]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown encryption entry `{}`", key);
         }
     }
 }

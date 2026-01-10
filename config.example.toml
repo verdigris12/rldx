@@ -190,3 +190,38 @@ min_fn_spaces = 1
 # Entropy measures randomness: "john.doe" ~2.5, "a8f3d2e1-4b5c" ~3.8
 # Default: 3.5
 email_entropy_threshold = 3.5
+
+# =============================================================================
+# Encryption
+# =============================================================================
+# Encrypt vCard files and the index database for secure storage.
+# Similar workflow to `pass` - uses GPG or age for key management.
+#
+# Encryption types:
+#   none - No encryption (default, plaintext storage)
+#   gpg  - GPG encryption (uses gpg-agent, files stored as .vcf.gpg)
+#   age  - Age encryption (modern alternative, files stored as .vcf.age)
+#
+# When encryption is enabled:
+#   - All vCard files are encrypted with the specified key
+#   - The SQLite index database is encrypted with SQLCipher
+#   - Decryption happens transparently when reading contacts
+#   - Hard fail on decryption errors (no silent fallback)
+
+[encryption]
+# Encryption backend: "none", "gpg", or "age"
+# type = "none"
+
+# GPG Configuration (required if type = "gpg")
+# The key ID to use for encryption. Can be:
+#   - Short key ID: "0x1234ABCD"
+#   - Long key ID: "0x1234ABCD5678EF90"
+#   - Fingerprint: "1234ABCD5678EF901234ABCD5678EF901234ABCD"
+#   - Email: "user@example.com"
+# gpg_key_id = "0x1234ABCD"
+
+# Age Configuration (required if type = "age")
+# Path to the age identity file (private key)
+# age_identity = "~/.config/rldx/age-identity.txt"
+# Age recipient public key (starts with "age1...")
+# age_recipient = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"

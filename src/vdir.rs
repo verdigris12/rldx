@@ -7,6 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use sha1::{Digest, Sha1};
 use uuid::Uuid;
 
+use crate::config::EncryptionType;
+use crate::crypto::CryptoProvider;
 use crate::vcard_io::{self, CardWithSource};
 
 const NORMALIZED_MARKER: &str = ".rldx_normalized";
@@ -180,37 +182,72 @@ pub(crate) fn select_filename(
 }
 
 pub(crate) fn existing_stems(vdir: &Path) -> Result<HashSet<String>> {
+    existing_stems_with_encryption(vdir, EncryptionType::None)
+}
+
+pub(crate) fn existing_stems_with_encryption(vdir: &Path, encryption_type: EncryptionType) -> Result<HashSet<String>> {
     let mut stems = HashSet::new();
-    let mut files = list_vcf_files(vdir)?;
+    let mut files = list_vcf_files_with_encryption(vdir, encryption_type)?;
     files.sort();
     for path in files {
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            stems.insert(stem.to_string());
+        if let Some(stem) = vcf_base_stem(&path) {
+            stems.insert(stem);
         }
     }
     Ok(stems)
 }
 
+/// List all vCard files (plain .vcf only)
 pub fn list_vcf_files(root: &Path) -> Result<Vec<PathBuf>> {
+    list_vcf_files_with_encryption(root, EncryptionType::None)
+}
+
+/// List vCard files for a specific encryption type
+pub fn list_vcf_files_with_encryption(root: &Path, encryption_type: EncryptionType) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    collect_vcf(root, &mut files)?;
+    collect_vcf(root, &mut files, encryption_type)?;
     Ok(files)
 }
 
-fn collect_vcf(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+/// Check if a file matches the expected vCard extension for the given encryption type
+fn is_vcf_file(path: &Path, encryption_type: EncryptionType) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let name_lower = name.to_ascii_lowercase();
+
+    match encryption_type {
+        EncryptionType::None => name_lower.ends_with(".vcf"),
+        EncryptionType::Gpg => name_lower.ends_with(".vcf.gpg"),
+        EncryptionType::Age => name_lower.ends_with(".vcf.age"),
+    }
+}
+
+/// Get the base stem of a vCard file (without any .vcf, .gpg, .age extensions)
+pub fn vcf_base_stem(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let name_lower = name.to_ascii_lowercase();
+
+    // Check for encrypted extensions first
+    if name_lower.ends_with(".vcf.gpg") {
+        return Some(name[..name.len() - 8].to_string());
+    }
+    if name_lower.ends_with(".vcf.age") {
+        return Some(name[..name.len() - 8].to_string());
+    }
+    if name_lower.ends_with(".vcf") {
+        return Some(name[..name.len() - 4].to_string());
+    }
+    None
+}
+
+fn collect_vcf(dir: &Path, files: &mut Vec<PathBuf>, encryption_type: EncryptionType) -> Result<()> {
     for entry in
         fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_vcf(&path, files)?;
-        } else if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("vcf"))
-            .unwrap_or(false)
-        {
+            collect_vcf(&path, files, encryption_type)?;
+        } else if is_vcf_file(&path, encryption_type) {
             files.push(path);
         }
     }
@@ -304,4 +341,39 @@ pub fn write_atomic(target: &Path, data: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Encrypted file I/O
+// =============================================================================
+
+/// Read a vCard file, decrypting if necessary
+pub fn read_vcf_file(path: &Path, provider: &dyn CryptoProvider) -> Result<String> {
+    let data = fs::read(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    // Decrypt if encryption is enabled
+    let plaintext = provider.decrypt(&data)
+        .with_context(|| format!("failed to decrypt {}", path.display()))?;
+
+    String::from_utf8(plaintext)
+        .with_context(|| format!("vCard file {} contains invalid UTF-8", path.display()))
+}
+
+/// Write a vCard file, encrypting if necessary
+pub fn write_vcf_file(path: &Path, data: &[u8], provider: &dyn CryptoProvider) -> Result<()> {
+    let encrypted = provider.encrypt(data)
+        .with_context(|| format!("failed to encrypt data for {}", path.display()))?;
+
+    write_atomic(path, &encrypted)
+}
+
+/// Get the target path for a vCard file with the correct extension
+pub fn vcf_target_path(vdir: &Path, stem: &str, encryption_type: EncryptionType) -> PathBuf {
+    let extension = match encryption_type {
+        EncryptionType::None => "vcf",
+        EncryptionType::Gpg => "vcf.gpg",
+        EncryptionType::Age => "vcf.age",
+    };
+    vdir.join(format!("{}.{}", stem, extension))
 }
