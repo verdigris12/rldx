@@ -181,8 +181,17 @@ pub(crate) fn select_filename(
     }
 }
 
+/// Get all existing file stems in vdir (for both encryption types)
 pub(crate) fn existing_stems(vdir: &Path) -> Result<HashSet<String>> {
-    existing_stems_with_encryption(vdir, EncryptionType::None)
+    let mut stems = HashSet::new();
+    let mut files = list_vcf_files(vdir)?;
+    files.sort();
+    for path in files {
+        if let Some(stem) = vcf_base_stem(&path) {
+            stems.insert(stem);
+        }
+    }
+    Ok(stems)
 }
 
 pub(crate) fn existing_stems_with_encryption(vdir: &Path, encryption_type: EncryptionType) -> Result<HashSet<String>> {
@@ -197,9 +206,30 @@ pub(crate) fn existing_stems_with_encryption(vdir: &Path, encryption_type: Encry
     Ok(stems)
 }
 
-/// List all vCard files (plain .vcf only)
+/// List all vCard files (both .vcf.gpg and .vcf.age)
 pub fn list_vcf_files(root: &Path) -> Result<Vec<PathBuf>> {
-    list_vcf_files_with_encryption(root, EncryptionType::None)
+    let mut files = Vec::new();
+    collect_all_vcf(root, &mut files)?;
+    Ok(files)
+}
+
+fn collect_all_vcf(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in
+        fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_all_vcf(&path, files)?;
+        } else {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let name_lower = name.to_ascii_lowercase();
+            if name_lower.ends_with(".vcf.gpg") || name_lower.ends_with(".vcf.age") {
+                files.push(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// List vCard files for a specific encryption type
@@ -215,7 +245,6 @@ fn is_vcf_file(path: &Path, encryption_type: EncryptionType) -> bool {
     let name_lower = name.to_ascii_lowercase();
 
     match encryption_type {
-        EncryptionType::None => name_lower.ends_with(".vcf"),
         EncryptionType::Gpg => name_lower.ends_with(".vcf.gpg"),
         EncryptionType::Age => name_lower.ends_with(".vcf.age"),
     }
@@ -371,7 +400,6 @@ pub fn write_vcf_file(path: &Path, data: &[u8], provider: &dyn CryptoProvider) -
 /// Get the target path for a vCard file with the correct extension
 pub fn vcf_target_path(vdir: &Path, stem: &str, encryption_type: EncryptionType) -> PathBuf {
     let extension = match encryption_type {
-        EncryptionType::None => "vcf",
         EncryptionType::Gpg => "vcf.gpg",
         EncryptionType::Age => "vcf.age",
     };

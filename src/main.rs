@@ -11,10 +11,10 @@ mod vdir;
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use age::secrecy::ExposeSecret;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use config::Config;
@@ -35,27 +35,41 @@ enum Command {
     Import(ImportArgs),
     /// Query contacts for email addresses (abook-compatible output for aerc/mutt)
     Query(QueryArgs),
-    /// Initialize encryption (generate age keys)
+    /// Initialize rldx with encryption and create config
     Init(InitArgs),
 }
 
 #[derive(Args, Debug)]
 struct InitArgs {
-    /// Encryption type to initialize
-    #[arg(long, value_enum, default_value = "age")]
-    encryption: InitEncryption,
+    /// Path to vCard storage directory (will be created)
+    #[arg(value_name = "PATH")]
+    vdir: PathBuf,
 
-    /// Force overwrite existing identity file
+    /// Encryption type (required)
+    #[arg(long, value_enum)]
+    encryption: EncryptionArg,
+
+    /// GPG key ID (required for --encryption gpg)
+    #[arg(long)]
+    key: Option<String>,
+
+    /// Path to age identity file (optional for --encryption age, generates new if not specified)
+    #[arg(long)]
+    identity: Option<PathBuf>,
+
+    /// Age recipient public key (optional for --encryption age, derived from identity if not specified)
+    #[arg(long)]
+    recipient: Option<String>,
+
+    /// Force overwrite existing configuration
     #[arg(long, short = 'f')]
     force: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
-enum InitEncryption {
-    /// Generate age identity (recommended)
-    Age,
-    /// Show GPG configuration help
+enum EncryptionArg {
     Gpg,
+    Age,
 }
 
 #[derive(Args, Debug)]
@@ -309,82 +323,350 @@ fn reindex(db: &mut Database, config: &Config, force: bool) -> Result<()> {
 }
 
 fn handle_init(args: &InitArgs) -> Result<()> {
-    match args.encryption {
-        InitEncryption::Age => init_age(args.force),
-        InitEncryption::Gpg => init_gpg_help(),
-    }
-}
+    let config_path = config::config_path()?;
+    let config_dir = config_path.parent().unwrap().to_path_buf();
 
-fn init_age(force: bool) -> Result<()> {
-    // Ensure config directory exists
-    config::ensure_config_dir()?;
-    let config_dir = config::config_path()?.parent().unwrap().to_path_buf();
-    let identity_path = config_dir.join("age-identity.txt");
-
-    if identity_path.exists() && !force {
-        anyhow::bail!(
-            "age identity already exists at {}\nUse --force to overwrite",
-            identity_path.display()
+    // 1. Check if config already exists
+    if config_path.exists() && !args.force {
+        bail!(
+            "Configuration already exists at {}\n\
+             Remove it first or use --force to overwrite.",
+            config_path.display()
         );
     }
 
-    // Generate new age identity
+    // 2. Validate encryption arguments
+    let (encryption_type, encryption_section) = match args.encryption {
+        EncryptionArg::Gpg => {
+            let key = args.key.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("--key is required for GPG encryption")
+            })?;
+
+            // Verify GPG key exists
+            let output = std::process::Command::new("gpg")
+                .args(["--list-keys", key])
+                .output()
+                .context("failed to execute gpg - is GPG installed?")?;
+
+            if !output.status.success() {
+                bail!(
+                    "GPG key '{}' not found. Make sure the key is imported.\n\
+                     Run 'gpg --list-keys' to see available keys.",
+                    key
+                );
+            }
+
+            let section = format!(
+                r#"[encryption]
+type = "gpg"
+gpg_key_id = "{}""#,
+                key
+            );
+            ("gpg", section)
+        }
+        EncryptionArg::Age => {
+            // Handle identity and recipient
+            let (identity_path, recipient) = if let Some(ref identity) = args.identity {
+                // Use provided identity file
+                if !identity.exists() {
+                    bail!("age identity file not found: {}", identity.display());
+                }
+                let recipient = if let Some(ref r) = args.recipient {
+                    r.clone()
+                } else {
+                    // Derive recipient from identity file
+                    derive_age_recipient(identity)?
+                };
+                (identity.clone(), recipient)
+            } else {
+                // Generate new identity
+                if args.recipient.is_some() {
+                    bail!("--recipient cannot be specified without --identity");
+                }
+
+                let identity_path = config_dir.join("age-identity.txt");
+                let (identity_content, recipient) = generate_age_identity()?;
+
+                // Ensure config dir exists for identity file
+                fs::create_dir_all(&config_dir)
+                    .with_context(|| format!("failed to create config dir: {}", config_dir.display()))?;
+
+                fs::write(&identity_path, &identity_content)
+                    .with_context(|| format!("failed to write identity file: {}", identity_path.display()))?;
+
+                // Set restrictive permissions on Unix
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o600);
+                    fs::set_permissions(&identity_path, perms)?;
+                }
+
+                println!("Generated age identity at: {}", identity_path.display());
+                (identity_path, recipient)
+            };
+
+            let section = format!(
+                r#"[encryption]
+type = "age"
+age_identity = "{}"
+age_recipient = "{}""#,
+                identity_path.display(),
+                recipient
+            );
+            ("age", section)
+        }
+    };
+
+    // 3. Validate vdir path
+    let vdir = &args.vdir;
+    if vdir.exists() {
+        // Check if directory is empty
+        let entries: Vec<_> = fs::read_dir(vdir)
+            .with_context(|| format!("failed to read directory: {}", vdir.display()))?
+            .collect();
+
+        if !entries.is_empty() {
+            bail!(
+                "Directory already exists and is not empty: {}\n\
+                 Choose a different path or empty the directory first.",
+                vdir.display()
+            );
+        }
+    }
+
+    // 4. Create directories
+    fs::create_dir_all(&config_dir)
+        .with_context(|| format!("failed to create config dir: {}", config_dir.display()))?;
+
+    fs::create_dir_all(vdir)
+        .with_context(|| format!("failed to create vdir: {}", vdir.display()))?;
+
+    // 5. Generate and write config.toml
+    let config_content = generate_config_file(vdir, &encryption_section)?;
+    fs::write(&config_path, &config_content)
+        .with_context(|| format!("failed to write config file: {}", config_path.display()))?;
+
+    // Set restrictive permissions on config file
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&config_path, perms)?;
+    }
+
+    // 6. Print success message
+    println!();
+    println!("Initialized rldx with {} encryption.", encryption_type);
+    println!();
+    println!("Configuration: {}", config_path.display());
+    println!("vCard storage: {}", vdir.display());
+    println!();
+    println!("Run 'rldx' to start the application.");
+
+    Ok(())
+}
+
+/// Generate a new age identity and return (file_content, recipient)
+fn generate_age_identity() -> Result<(String, String)> {
     let identity = age::x25519::Identity::generate();
     let recipient = identity.to_public();
 
-    // Write identity file
-    let identity_content = format!(
+    let content = format!(
         "# rldx age identity - created {}\n# public key: {}\n{}\n",
         chrono_lite::now(),
         recipient,
         identity.to_string().expose_secret(),
     );
 
-    fs::write(&identity_path, identity_content)
-        .with_context(|| format!("failed to write identity file: {}", identity_path.display()))?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&identity_path, perms)?;
-    }
-
-    println!("Generated age identity at: {}", identity_path.display());
-    println!();
-    println!("Add the following to your config.toml:");
-    println!();
-    println!("[encryption]");
-    println!("type = \"age\"");
-    println!("age_identity = \"{}\"", identity_path.display());
-    println!("age_recipient = \"{}\"", recipient);
-    println!();
-    Ok(())
+    Ok((content, recipient.to_string()))
 }
 
-fn init_gpg_help() -> Result<()> {
-    println!("GPG Encryption Setup");
-    println!("====================");
-    println!();
-    println!("1. Ensure you have a GPG key pair. List your keys with:");
-    println!("   gpg --list-keys");
-    println!();
-    println!("2. If you don't have a key, generate one with:");
-    println!("   gpg --full-generate-key");
-    println!();
-    println!("3. Note your key ID (looks like 0x1234ABCD or a 40-character fingerprint)");
-    println!();
-    println!("4. Add the following to your config.toml:");
-    println!();
-    println!("[encryption]");
-    println!("type = \"gpg\"");
-    println!("gpg_key_id = \"YOUR_KEY_ID_HERE\"");
-    println!();
-    println!("Note: GPG encryption uses gpg-agent for passphrase caching.");
-    println!("Make sure gpg-agent is running and configured correctly.");
+/// Derive the age recipient (public key) from an identity file
+fn derive_age_recipient(identity_path: &Path) -> Result<String> {
+    let content = fs::read_to_string(identity_path)
+        .with_context(|| format!("failed to read identity file: {}", identity_path.display()))?;
 
-    Ok(())
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("AGE-SECRET-KEY-") {
+            let identity: age::x25519::Identity = line
+                .parse()
+                .map_err(|e| anyhow::anyhow!("failed to parse age identity: {}", e))?;
+            return Ok(identity.to_public().to_string());
+        }
+    }
+
+    bail!("no valid age identity found in {}", identity_path.display())
+}
+
+/// Generate the config.toml content
+fn generate_config_file(vdir: &Path, encryption_section: &str) -> Result<String> {
+    // Canonicalize the vdir path for cleaner output
+    let vdir_str = vdir.canonicalize()
+        .unwrap_or_else(|_| vdir.to_path_buf())
+        .display()
+        .to_string();
+
+    let config = format!(
+        r##"# rldx configuration
+# Generated by 'rldx init'
+
+# Path to the directory containing your vCard files.
+vdir = "{vdir}"
+
+# =============================================================================
+# Encryption (required)
+# =============================================================================
+# All vCard files are encrypted. Supported backends:
+#   gpg - GPG encryption (uses gpg-agent, files stored as .vcf.gpg)
+#   age - Age encryption (modern alternative, files stored as .vcf.age)
+
+{encryption}
+
+# =============================================================================
+# Top Bar Buttons
+# =============================================================================
+# Map function keys (F1-F12) to actions displayed in the header bar.
+# Supported actions: help, edit, refresh, share
+
+[top_bar]
+F1 = "help"
+F3 = "edit"
+F5 = "refresh"
+F7 = "share"
+
+# Optional: override which fields appear in the first pane.
+# fields_first_pane = ["fname", "mname", "lname", "alias", "phone", "email"]
+
+# Optional: default region for phone number normalization (ISO 3166-1 alpha-2).
+# phone_region = "US"
+
+# =============================================================================
+# Key Bindings
+# =============================================================================
+# Keys are organized by context. Each action can have multiple bindings.
+# Supported key names:
+#   - Single characters: "a", "A", "/", "?", etc. (case-sensitive)
+#   - Special keys: "Enter", "Escape", "Tab", "Backtab", "Space", "Backspace"
+#   - Arrow keys: "Up", "Down", "Left", "Right"
+#   - Navigation: "PageUp", "PageDown", "Home", "End"
+#   - Function keys: "F1" through "F12"
+
+[keys.global]
+quit = ["q"]
+search = ["/"]
+help = ["F1", "?"]
+
+[keys.search_input]
+cancel = ["Escape"]
+confirm = ["Enter"]
+
+[keys.search_results]
+cancel = ["Escape"]
+confirm = ["Enter"]
+next = ["j", "Down", "Tab"]
+prev = ["k", "Up", "Backtab"]
+page_down = ["PageDown"]
+page_up = ["PageUp"]
+mark = ["Space"]
+merge = ["m"]
+toggle_marked = ["M"]
+
+[keys.navigation]
+next = ["j", "Down", "Tab"]
+prev = ["k", "Up", "Backtab"]
+tab_next = ["l", "Right"]
+tab_prev = ["h", "Left"]
+edit = ["e"]
+copy = ["y", "Space"]
+confirm = ["Enter"]
+add_alias = ["a"]
+photo_fetch = ["i"]
+lang_cycle = ["L"]
+
+[keys.modal]
+cancel = ["Escape", "q"]
+confirm = ["Enter", "y"]
+next = ["j", "Down", "Tab"]
+prev = ["k", "Up", "Backtab"]
+edit = ["e"]
+copy = ["y", "Space"]
+set_default = ["d"]
+
+[keys.editor]
+cancel = ["Escape"]
+confirm = ["Enter"]
+
+# =============================================================================
+# UI Configuration
+# =============================================================================
+
+[ui.colors]
+border = [255, 140, 0]
+selection_bg = [255, 140, 0]
+selection_fg = [0, 0, 0]
+separator = [255, 140, 0]
+status_fg = [255, 140, 0]
+status_bg = [0, 0, 0]
+
+[ui.icons]
+address_book = "@"
+contact = "👤 "
+organization = "🏢 "
+
+[ui.pane.image]
+width = 40
+height = 12
+
+# =============================================================================
+# Commands
+# =============================================================================
+
+[commands]
+# Program that receives copied values on stdin.
+# Examples:
+#   copy = ["wl-copy"]                           # Wayland
+#   copy = ["xclip", "-selection", "clipboard"]  # X11
+#   copy = ["pbcopy"]                            # macOS
+copy = ["wl-copy"]
+
+# =============================================================================
+# Maildir Import Filters
+# =============================================================================
+# Filters for 'rldx import --format maildir' command.
+
+[maildir_import]
+skip_local_patterns = [
+    "noreply", "no-reply", "no_reply",
+    "donotreply", "do-not-reply", "do_not_reply",
+    "notifications", "notification",
+    "mailer-daemon", "postmaster", "bounce",
+    "auto-reply", "autoreply", "automated"
+]
+
+skip_domains = [
+    "facebookmail.com", "*.facebookmail.com",
+    "linkedin.com", "*.linkedin.com",
+    "amazonses.com", "*.amazonses.com",
+    "sendgrid.net", "*.sendgrid.net",
+    "mailchimp.com", "*.mailchimp.com",
+    "mailgun.org", "*.mailgun.org",
+]
+
+simhash_threshold = 4
+min_name_length = 8
+min_fn_spaces = 1
+email_entropy_threshold = 3.5
+"##,
+        vdir = vdir_str,
+        encryption = encryption_section
+    );
+
+    Ok(config)
 }
 
 // Simple date/time helper (avoid heavy chrono dependency)

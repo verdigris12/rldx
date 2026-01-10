@@ -29,11 +29,8 @@ pub struct Config {
 // =============================================================================
 
 /// Encryption backend type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionType {
-    /// No encryption (plaintext storage)
-    #[default]
-    None,
     /// GPG encryption (uses gpg-agent for key management)
     Gpg,
     /// Age encryption (modern, simpler alternative to GPG)
@@ -44,7 +41,6 @@ impl EncryptionType {
     /// Parse from string (case-insensitive)
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "none" => Some(EncryptionType::None),
             "gpg" => Some(EncryptionType::Gpg),
             "age" => Some(EncryptionType::Age),
             _ => None,
@@ -54,15 +50,9 @@ impl EncryptionType {
     /// File extension for encrypted vCard files
     pub fn vcf_extension(&self) -> &'static str {
         match self {
-            EncryptionType::None => "vcf",
             EncryptionType::Gpg => "vcf.gpg",
             EncryptionType::Age => "vcf.age",
         }
-    }
-
-    /// Check if encryption is enabled
-    pub fn is_enabled(&self) -> bool {
-        !matches!(self, EncryptionType::None)
     }
 }
 
@@ -79,22 +69,10 @@ pub struct EncryptionConfig {
     pub age_recipient: Option<String>,
 }
 
-impl Default for EncryptionConfig {
-    fn default() -> Self {
-        Self {
-            encryption_type: EncryptionType::None,
-            gpg_key_id: None,
-            age_identity: None,
-            age_recipient: None,
-        }
-    }
-}
-
 impl EncryptionConfig {
     /// Validate the encryption configuration
     pub fn validate(&self) -> Result<()> {
         match self.encryption_type {
-            EncryptionType::None => Ok(()),
             EncryptionType::Gpg => {
                 if self.gpg_key_id.is_none() {
                     bail!("encryption.gpg_key_id is required when encryption.type = \"gpg\"");
@@ -1164,12 +1142,14 @@ impl Default for EncryptionFile {
 impl EncryptionFile {
     fn into_config(self) -> Result<EncryptionConfig> {
         let encryption_type = match self.encryption_type.as_deref() {
-            None | Some("none") => EncryptionType::None,
             Some("gpg") => EncryptionType::Gpg,
             Some("age") => EncryptionType::Age,
             Some(other) => bail!(
-                "invalid encryption.type '{}', expected one of: none, gpg, age",
+                "invalid encryption.type '{}', expected one of: gpg, age",
                 other
+            ),
+            None => bail!(
+                "encryption.type is required. Run 'rldx init' to set up encryption."
             ),
         };
 

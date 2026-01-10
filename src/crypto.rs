@@ -36,36 +36,6 @@ pub trait CryptoProvider: Send + Sync {
 }
 
 // =============================================================================
-// No-op Provider (plaintext)
-// =============================================================================
-
-/// No-op provider for unencrypted storage
-pub struct PlaintextProvider;
-
-impl CryptoProvider for PlaintextProvider {
-    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        Ok(plaintext.to_vec())
-    }
-
-    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        Ok(ciphertext.to_vec())
-    }
-
-    fn derive_db_key(&self) -> Result<String> {
-        // No encryption - return empty key (SQLCipher will use no encryption)
-        Ok(String::new())
-    }
-
-    fn file_extension(&self) -> &'static str {
-        "vcf"
-    }
-
-    fn encryption_type(&self) -> EncryptionType {
-        EncryptionType::None
-    }
-}
-
-// =============================================================================
 // GPG Provider
 // =============================================================================
 
@@ -384,7 +354,6 @@ impl CryptoProvider for AgeProvider {
 /// Create a CryptoProvider from configuration
 pub fn create_provider(config: &EncryptionConfig) -> Result<Box<dyn CryptoProvider>> {
     match config.encryption_type {
-        EncryptionType::None => Ok(Box::new(PlaintextProvider)),
         EncryptionType::Gpg => {
             let key_id = config
                 .gpg_key_id
@@ -427,25 +396,6 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_plaintext_provider() {
-        let provider = PlaintextProvider;
-        let data = b"Hello, World!";
-
-        let encrypted = provider.encrypt(data).unwrap();
-        assert_eq!(encrypted, data);
-
-        let decrypted = provider.decrypt(&encrypted).unwrap();
-        assert_eq!(decrypted, data);
-    }
-
-    #[test]
-    fn test_plaintext_provider_db_key() {
-        let provider = PlaintextProvider;
-        let key = provider.derive_db_key().unwrap();
-        assert!(key.is_empty());
-    }
 
     #[test]
     fn test_hex_encode() {
