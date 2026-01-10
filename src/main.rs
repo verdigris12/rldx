@@ -23,6 +23,10 @@ use db::Database;
 #[derive(Parser, Debug)]
 #[command(name = "rldx")]
 struct Cli {
+    /// Path to configuration file (default: ~/.config/rldx/config.toml)
+    #[arg(long, short = 'c', global = true)]
+    config: Option<PathBuf>,
+
     #[arg(long, default_value_t = false)]
     reindex: bool,
 
@@ -112,11 +116,11 @@ fn main() -> Result<()> {
     // Handle commands that don't need config first
     if let Some(ref command) = cli.command {
         if let Command::Init(ref args) = command {
-            return handle_init(args);
+            return handle_init(args, cli.config.as_deref());
         }
     }
 
-    let config = config::load()?;
+    let config = config::load_from(cli.config.as_deref())?;
 
     // Create the encryption provider
     let provider = crypto::create_provider(&config.encryption)?;
@@ -339,9 +343,15 @@ fn reindex(
     Ok(())
 }
 
-fn handle_init(args: &InitArgs) -> Result<()> {
-    let config_path = config::config_path()?;
-    let config_dir = config_path.parent().unwrap().to_path_buf();
+fn handle_init(args: &InitArgs, custom_config_path: Option<&Path>) -> Result<()> {
+    let config_path = match custom_config_path {
+        Some(p) => config::expand_tilde(p),
+        None => config::config_path()?,
+    };
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent directory"))?
+        .to_path_buf();
 
     // 1. Check if config already exists
     if config_path.exists() && !args.force {
@@ -435,11 +445,11 @@ age_recipient = "{}""#,
         }
     };
 
-    // 3. Validate vdir path
-    let vdir = &args.vdir;
+    // 3. Validate vdir path (expand tilde)
+    let vdir = config::expand_tilde(&args.vdir);
     if vdir.exists() {
         // Check if directory is empty
-        let entries: Vec<_> = fs::read_dir(vdir)
+        let entries: Vec<_> = fs::read_dir(&vdir)
             .with_context(|| format!("failed to read directory: {}", vdir.display()))?
             .collect();
 
@@ -456,11 +466,11 @@ age_recipient = "{}""#,
     fs::create_dir_all(&config_dir)
         .with_context(|| format!("failed to create config dir: {}", config_dir.display()))?;
 
-    fs::create_dir_all(vdir)
+    fs::create_dir_all(&vdir)
         .with_context(|| format!("failed to create vdir: {}", vdir.display()))?;
 
     // 5. Generate and write config.toml
-    let config_content = generate_config_file(vdir, &encryption_section)?;
+    let config_content = generate_config_file(&vdir, &encryption_section)?;
     fs::write(&config_path, &config_content)
         .with_context(|| format!("failed to write config file: {}", config_path.display()))?;
 

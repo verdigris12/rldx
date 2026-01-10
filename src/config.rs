@@ -103,7 +103,7 @@ impl EncryptionConfig {
 }
 
 /// Expand ~ to home directory in paths
-fn expand_tilde(path: &Path) -> PathBuf {
+pub fn expand_tilde(path: &Path) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix("~") {
         if let Some(home) = home::home_dir() {
             return home.join(stripped);
@@ -1200,9 +1200,21 @@ pub fn ensure_config_dir() -> Result<()> {
     Ok(())
 }
 
+/// Load config from default location
 pub fn load() -> Result<Config> {
-    ensure_config_dir()?;
-    let path = config_path()?;
+    load_from(None)
+}
+
+/// Load config from specified path (or default if None)
+pub fn load_from(custom_path: Option<&Path>) -> Result<Config> {
+    let path = match custom_path {
+        Some(p) => expand_tilde(p),
+        None => {
+            ensure_config_dir()?;
+            config_path()?
+        }
+    };
+
     if !path.exists() {
         bail!(
             "configuration file not found at {}. Please create it as per docs.",
@@ -1225,6 +1237,9 @@ pub fn load() -> Result<Config> {
     let vdir = cfg_file
         .vdir
         .ok_or_else(|| anyhow!("`vdir` must be specified in configuration"))?;
+
+    // Expand tilde in vdir path
+    let vdir = expand_tilde(&vdir);
 
     if !vdir.exists() {
         bail!("configured vdir does not exist: {}", vdir.display());
