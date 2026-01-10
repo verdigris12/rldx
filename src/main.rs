@@ -17,7 +17,7 @@ use age::secrecy::ExposeSecret;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use config::{Config, EncryptionType};
+use config::Config;
 use db::Database;
 
 #[derive(Parser, Debug)]
@@ -37,8 +37,6 @@ enum Command {
     Query(QueryArgs),
     /// Initialize encryption (generate age keys)
     Init(InitArgs),
-    /// Encrypt existing plaintext vCards (migration)
-    Encrypt(EncryptArgs),
 }
 
 #[derive(Args, Debug)]
@@ -58,23 +56,6 @@ enum InitEncryption {
     Age,
     /// Show GPG configuration help
     Gpg,
-}
-
-#[derive(Args, Debug)]
-struct EncryptArgs {
-    /// Encryption type to use (must match config)
-    #[arg(long, value_enum)]
-    encryption: EncryptionArg,
-
-    /// Dry run - show what would be done without making changes
-    #[arg(long)]
-    dry_run: bool,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-enum EncryptionArg {
-    Gpg,
-    Age,
 }
 
 #[derive(Args, Debug)]
@@ -136,10 +117,6 @@ fn main() -> Result<()> {
             Command::Init(_) => {
                 // Already handled above
                 unreachable!();
-            }
-            Command::Encrypt(args) => {
-                handle_encrypt(args, &config)?;
-                return Ok(());
             }
         }
     }
@@ -383,8 +360,6 @@ fn init_age(force: bool) -> Result<()> {
     println!("age_identity = \"{}\"", identity_path.display());
     println!("age_recipient = \"{}\"", recipient);
     println!();
-    println!("Then run 'rldx encrypt --encryption age' to encrypt existing vCards.");
-
     Ok(())
 }
 
@@ -406,115 +381,8 @@ fn init_gpg_help() -> Result<()> {
     println!("type = \"gpg\"");
     println!("gpg_key_id = \"YOUR_KEY_ID_HERE\"");
     println!();
-    println!("5. Then run 'rldx encrypt --encryption gpg' to encrypt existing vCards.");
-    println!();
     println!("Note: GPG encryption uses gpg-agent for passphrase caching.");
     println!("Make sure gpg-agent is running and configured correctly.");
-
-    Ok(())
-}
-
-fn handle_encrypt(args: EncryptArgs, config: &Config) -> Result<()> {
-    let target_type = match args.encryption {
-        EncryptionArg::Gpg => EncryptionType::Gpg,
-        EncryptionArg::Age => EncryptionType::Age,
-    };
-
-    // Verify config matches the requested encryption type
-    if config.encryption.encryption_type != target_type {
-        anyhow::bail!(
-            "config.toml encryption type ({:?}) doesn't match requested type ({:?})\n\
-             Please update your config.toml first.",
-            config.encryption.encryption_type,
-            target_type
-        );
-    }
-
-    // Create the crypto provider
-    let provider = crypto::create_provider(&config.encryption)?;
-
-    // Find all plaintext .vcf files
-    let vcf_files = vdir::list_vcf_files(&config.vdir)?;
-
-    if vcf_files.is_empty() {
-        println!("No plaintext .vcf files found to encrypt.");
-        return Ok(());
-    }
-
-    println!("Found {} plaintext vCard files to encrypt.", vcf_files.len());
-
-    if args.dry_run {
-        println!("\nDry run - would encrypt:");
-        for path in &vcf_files {
-            let stem = vdir::vcf_base_stem(path).unwrap_or_default();
-            let target = vdir::vcf_target_path(&config.vdir, &stem, target_type);
-            println!("  {} -> {}", path.display(), target.display());
-        }
-        return Ok(());
-    }
-
-    let mut encrypted = 0;
-    let mut errors = 0;
-
-    for path in vcf_files {
-        let stem = match vdir::vcf_base_stem(&path) {
-            Some(s) => s,
-            None => {
-                eprintln!("warning: could not determine stem for {}", path.display());
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Read plaintext
-        let plaintext = match fs::read(&path) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("warning: failed to read {}: {}", path.display(), e);
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Encrypt
-        let ciphertext = match provider.encrypt(&plaintext) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("warning: failed to encrypt {}: {}", path.display(), e);
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Write encrypted file
-        let target = vdir::vcf_target_path(&config.vdir, &stem, target_type);
-        if let Err(e) = vdir::write_atomic(&target, &ciphertext) {
-            eprintln!("warning: failed to write {}: {}", target.display(), e);
-            errors += 1;
-            continue;
-        }
-
-        // Remove original plaintext file
-        if let Err(e) = fs::remove_file(&path) {
-            eprintln!(
-                "warning: failed to remove original {}: {}",
-                path.display(),
-                e
-            );
-            // Don't count as error since encryption succeeded
-        }
-
-        encrypted += 1;
-    }
-
-    println!("\nEncrypted {} files.", encrypted);
-    if errors > 0 {
-        println!("{} files had errors.", errors);
-    }
-
-    // Also encrypt the database
-    println!("\nNote: The database will be encrypted on next startup.");
-    println!("Run 'rldx --reindex' to force a full reindex with encryption.");
 
     Ok(())
 }
