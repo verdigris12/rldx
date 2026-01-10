@@ -207,18 +207,6 @@ pub(crate) fn existing_stems(vdir: &Path) -> Result<HashSet<String>> {
     Ok(stems)
 }
 
-pub(crate) fn existing_stems_with_encryption(vdir: &Path, encryption_type: EncryptionType) -> Result<HashSet<String>> {
-    let mut stems = HashSet::new();
-    let mut files = list_vcf_files_with_encryption(vdir, encryption_type)?;
-    files.sort();
-    for path in files {
-        if let Some(stem) = vcf_base_stem(&path) {
-            stems.insert(stem);
-        }
-    }
-    Ok(stems)
-}
-
 /// List all vCard files (both .vcf.gpg and .vcf.age)
 pub fn list_vcf_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
@@ -245,24 +233,6 @@ fn collect_all_vcf(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// List vCard files for a specific encryption type
-pub fn list_vcf_files_with_encryption(root: &Path, encryption_type: EncryptionType) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    collect_vcf(root, &mut files, encryption_type)?;
-    Ok(files)
-}
-
-/// Check if a file matches the expected vCard extension for the given encryption type
-fn is_vcf_file(path: &Path, encryption_type: EncryptionType) -> bool {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let name_lower = name.to_ascii_lowercase();
-
-    match encryption_type {
-        EncryptionType::Gpg => name_lower.ends_with(".vcf.gpg"),
-        EncryptionType::Age => name_lower.ends_with(".vcf.age"),
-    }
-}
-
 /// Get the base stem of a vCard file (without any .vcf, .gpg, .age extensions)
 pub fn vcf_base_stem(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
@@ -279,21 +249,6 @@ pub fn vcf_base_stem(path: &Path) -> Option<String> {
         return Some(name[..name.len() - 4].to_string());
     }
     None
-}
-
-fn collect_vcf(dir: &Path, files: &mut Vec<PathBuf>, encryption_type: EncryptionType) -> Result<()> {
-    for entry in
-        fs::read_dir(dir).with_context(|| format!("failed to read directory {}", dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_vcf(&path, files, encryption_type)?;
-        } else if is_vcf_file(&path, encryption_type) {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 pub struct FileState {

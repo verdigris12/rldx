@@ -28,9 +28,6 @@ pub trait CryptoProvider: Send + Sync {
     /// The key should be derived from the encryption key material
     fn derive_db_key(&self) -> Result<String>;
 
-    /// Get the file extension for encrypted files (e.g., "vcf.gpg")
-    fn file_extension(&self) -> &'static str;
-
     /// Get the encryption type
     fn encryption_type(&self) -> EncryptionType;
 }
@@ -172,10 +169,6 @@ impl CryptoProvider for GpgProvider {
 
         // Convert to hex string for SQLCipher PRAGMA key
         Ok(format!("x'{}'", hex::encode(hash)))
-    }
-
-    fn file_extension(&self) -> &'static str {
-        "vcf.gpg"
     }
 
     fn encryption_type(&self) -> EncryptionType {
@@ -336,10 +329,6 @@ impl CryptoProvider for AgeProvider {
 
         // Convert to hex string for SQLCipher PRAGMA key
         Ok(format!("x'{}'", hex::encode(hash)))
-    }
-
-    fn file_extension(&self) -> &'static str {
-        "vcf.age"
     }
 
     fn encryption_type(&self) -> EncryptionType {

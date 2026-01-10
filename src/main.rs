@@ -3,7 +3,9 @@ mod crypto;
 mod db;
 mod import;
 mod indexer;
+mod remote;
 mod search;
+mod sync;
 mod translit;
 mod ui;
 mod vcard_io;
@@ -41,6 +43,10 @@ enum Command {
     Query(QueryArgs),
     /// Initialize rldx with encryption and create config
     Init(InitArgs),
+    /// Manage remote CardDAV servers
+    Remote(RemoteArgs),
+    /// Sync contacts with a remote server
+    Sync(SyncArgs),
 }
 
 #[derive(Args, Debug)]
@@ -110,6 +116,93 @@ enum ImportFormat {
     Maildir,
 }
 
+#[derive(Args, Debug)]
+struct RemoteArgs {
+    #[command(subcommand)]
+    command: Option<RemoteCommand>,
+
+    /// Show detailed remote information
+    #[arg(short = 'v', long)]
+    verbose: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum RemoteCommand {
+    /// Add a new remote
+    Add(RemoteAddArgs),
+    /// List configured remotes (same as `rldx remote -v`)
+    List,
+    /// Remove a remote
+    Remove(RemoteRemoveArgs),
+    /// Test connection to a remote
+    Test(RemoteTestArgs),
+}
+
+#[derive(Args, Debug)]
+struct RemoteAddArgs {
+    /// Name for this remote (must be unique)
+    name: String,
+
+    /// Remote type
+    #[arg(long, value_enum)]
+    r#type: RemoteTypeArg,
+
+    /// Server URL (e.g., https://cloud.example.com/remote.php/dav)
+    #[arg(long)]
+    url: String,
+
+    /// Username for authentication
+    #[arg(long, short = 'u')]
+    user: String,
+
+    /// Address book name/path on the server
+    #[arg(long)]
+    address_book: String,
+
+    /// Command to get password (e.g., "pass show cloud")
+    #[arg(long)]
+    password_cmd: Option<String>,
+
+    /// Local subdirectory for contacts from this remote
+    #[arg(long)]
+    local_book: Option<String>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum RemoteTypeArg {
+    Carddav,
+}
+
+#[derive(Args, Debug)]
+struct RemoteRemoveArgs {
+    /// Name of the remote to remove
+    name: String,
+
+    /// Also delete sync metadata for this remote
+    #[arg(long)]
+    purge: bool,
+}
+
+#[derive(Args, Debug)]
+struct RemoteTestArgs {
+    /// Name of the remote to test
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct SyncArgs {
+    /// Name of the remote to sync with
+    name: String,
+
+    /// Only download changes from remote (don't upload local changes)
+    #[arg(long)]
+    pull_only: bool,
+
+    /// Dry run - show what would be synced without making changes
+    #[arg(long, short = 'n')]
+    dry_run: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -138,6 +231,14 @@ fn main() -> Result<()> {
             Command::Init(_) => {
                 // Already handled above
                 unreachable!();
+            }
+            Command::Remote(args) => {
+                handle_remote(args, &config, provider.as_ref())?;
+                return Ok(());
+            }
+            Command::Sync(args) => {
+                handle_sync(args, &config, provider.as_ref())?;
+                return Ok(());
             }
         }
     }
@@ -277,6 +378,233 @@ fn handle_import(args: ImportArgs, config: &Config, provider: &dyn crypto::Crypt
     };
 
     reindex(&mut db, config, false, provider)?;
+    Ok(())
+}
+
+fn handle_remote(args: RemoteArgs, config: &Config, provider: &dyn crypto::CryptoProvider) -> Result<()> {
+    match args.command {
+        Some(RemoteCommand::Add(add_args)) => {
+            handle_remote_add(add_args, config)?;
+        }
+        Some(RemoteCommand::List) => {
+            handle_remote_list(config, true)?;
+        }
+        Some(RemoteCommand::Remove(remove_args)) => {
+            handle_remote_remove(remove_args, config, provider)?;
+        }
+        Some(RemoteCommand::Test(test_args)) => {
+            handle_remote_test(test_args, config)?;
+        }
+        None => {
+            // With -v flag, show verbose list; otherwise short list
+            handle_remote_list(config, args.verbose)?;
+        }
+    }
+    Ok(())
+}
+
+fn handle_remote_add(args: RemoteAddArgs, config: &Config) -> Result<()> {
+    // Check for duplicate name
+    if config.remotes.iter().any(|r| r.name == args.name) {
+        bail!("remote '{}' already exists", args.name);
+    }
+
+    // Build the TOML section to add to config
+    let mut toml_section = format!(
+        r#"
+[[remotes]]
+name = "{}"
+type = "carddav"
+url = "{}"
+username = "{}"
+address_book = "{}""#,
+        args.name, args.url, args.user, args.address_book
+    );
+
+    if let Some(ref cmd) = args.password_cmd {
+        toml_section.push_str(&format!("\npassword_cmd = \"{}\"", cmd));
+    }
+
+    if let Some(ref local_book) = args.local_book {
+        toml_section.push_str(&format!("\nlocal_book = \"{}\"", local_book));
+    }
+
+    toml_section.push('\n');
+
+    // Append to config file
+    let mut content = fs::read_to_string(&config.config_path)
+        .with_context(|| format!("failed to read config: {}", config.config_path.display()))?;
+
+    content.push_str(&toml_section);
+
+    fs::write(&config.config_path, content)
+        .with_context(|| format!("failed to write config: {}", config.config_path.display()))?;
+
+    println!("Added remote '{}'", args.name);
+    println!();
+    println!("Run 'rldx remote test {}' to verify the connection.", args.name);
+    println!("Run 'rldx sync {}' to sync contacts.", args.name);
+
+    Ok(())
+}
+
+fn handle_remote_list(config: &Config, verbose: bool) -> Result<()> {
+    if config.remotes.is_empty() {
+        println!("No remotes configured.");
+        println!();
+        println!("Run 'rldx remote add <name> --type carddav --url <URL> --user <USER> --address-book <BOOK>' to add one.");
+        return Ok(());
+    }
+
+    if verbose {
+        for (i, remote) in config.remotes.iter().enumerate() {
+            if i > 0 {
+                println!();
+            }
+            println!("{}", remote.name);
+            println!("  Type: {}", remote.remote_type.as_str());
+            println!("  URL: {}", remote.url);
+            println!("  User: {}", remote.username);
+            println!("  Address Book: {}", remote.address_book);
+            if let Some(ref local_book) = remote.local_book {
+                println!("  Local Book: {}", local_book);
+            }
+            if let Some(conflict_prefer) = remote.conflict_prefer {
+                println!("  Conflict Prefer: {:?}", conflict_prefer);
+            }
+        }
+    } else {
+        for remote in &config.remotes {
+            println!("{}", remote.name);
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_remote_remove(args: RemoteRemoveArgs, config: &Config, provider: &dyn crypto::CryptoProvider) -> Result<()> {
+    // Find the remote
+    if !config.remotes.iter().any(|r| r.name == args.name) {
+        bail!("remote '{}' not found", args.name);
+    }
+
+    // Read and parse config file, remove the remote section
+    let content = fs::read_to_string(&config.config_path)
+        .with_context(|| format!("failed to read config: {}", config.config_path.display()))?;
+
+    // Parse as TOML value to manipulate
+    let mut value: toml::Value = toml::from_str(&content)
+        .with_context(|| "failed to parse config as TOML")?;
+
+    // Remove the remote from the array
+    if let Some(remotes) = value.get_mut("remotes") {
+        if let Some(arr) = remotes.as_array_mut() {
+            arr.retain(|r| {
+                r.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|n| n != args.name)
+                    .unwrap_or(true)
+            });
+        }
+    }
+
+    // Write back
+    let new_content = toml::to_string_pretty(&value)
+        .context("failed to serialize config")?;
+
+    fs::write(&config.config_path, new_content)
+        .with_context(|| format!("failed to write config: {}", config.config_path.display()))?;
+
+    println!("Removed remote '{}'", args.name);
+
+    // Optionally purge sync metadata
+    if args.purge {
+        let db_key = provider.derive_db_key()?;
+        let mut db = Database::open_with_key(&config.db_path, Some(&db_key))?;
+        db.delete_all_sync_metadata_for_remote(&args.name)?;
+        println!("Purged sync metadata for '{}'", args.name);
+    }
+
+    Ok(())
+}
+
+fn handle_remote_test(args: RemoteTestArgs, config: &Config) -> Result<()> {
+    use remote::Remote;
+
+    // Find the remote
+    let remote_config = config.remotes.iter()
+        .find(|r| r.name == args.name)
+        .ok_or_else(|| anyhow::anyhow!("remote '{}' not found", args.name))?
+        .clone();
+
+    println!("Testing connection to '{}'...", args.name);
+
+    // Use tokio runtime to test the connection
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let client = remote::carddav::CardDavRemote::new(remote_config).await?;
+        client.test_connection().await?;
+        Ok::<_, anyhow::Error>(())
+    })?;
+
+    println!("Connection successful!");
+    Ok(())
+}
+
+fn handle_sync(args: SyncArgs, config: &Config, provider: &dyn crypto::CryptoProvider) -> Result<()> {
+    use remote::Remote;
+    use sync::SyncEngine;
+
+    // Find the remote
+    let remote_config = config.remotes.iter()
+        .find(|r| r.name == args.name)
+        .ok_or_else(|| anyhow::anyhow!("remote '{}' not found", args.name))?
+        .clone();
+
+    println!("Syncing with '{}'...", args.name);
+    if args.dry_run {
+        println!("(dry run mode - no changes will be made)");
+    }
+    if args.pull_only {
+        println!("(pull-only mode - local changes will not be uploaded)");
+    }
+
+    // Open database
+    let db_key = provider.derive_db_key()?;
+    let mut db = Database::open_with_key(&config.db_path, Some(&db_key))?;
+
+    // Use tokio runtime for async operations
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        // Create CardDAV client
+        let client = remote::carddav::CardDavRemote::new(remote_config.clone()).await?;
+
+        // Test connection first
+        client.test_connection().await?;
+        println!("Connected to CardDAV server.");
+
+        // Create sync engine
+        let mut engine = SyncEngine::new(
+            config,
+            &remote_config,
+            &mut db,
+            provider,
+            args.dry_run,
+            args.pull_only,
+        );
+
+        // Run sync
+        engine.sync(&client).await?;
+
+        Ok::<_, anyhow::Error>(())
+    })?;
+
+    // Reindex after sync to update the search database
+    if !args.dry_run {
+        println!("Reindexing...");
+        reindex(&mut db, config, false, provider)?;
+    }
+
     Ok(())
 }
 

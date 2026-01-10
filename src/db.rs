@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::BaseDirs;
 use rusqlite::{params, Connection, Row, TransactionBehavior};
 use serde_json::Value;
 
@@ -74,19 +73,22 @@ pub struct QueryResult {
     pub notes: Option<String>,
 }
 
+/// Metadata for tracking sync state of a contact with a remote
+#[derive(Debug, Clone)]
+pub struct SyncMetadata {
+    pub contact_path: PathBuf,
+    pub remote_name: String,
+    pub remote_href: String,
+    pub remote_etag: Option<String>,
+    pub last_synced: Option<i64>,
+    pub local_modified: bool,
+}
+
 pub struct Database {
     conn: Connection,
 }
 
 impl Database {
-    /// Open the database without encryption at the default location
-    pub fn open() -> Result<Self> {
-        let base = BaseDirs::new().context("unable to determine data directories")?;
-        let data_dir = base.data_dir().join("rldx");
-        let db_path = data_dir.join("index.db");
-        Self::open_at(&db_path, None)
-    }
-
     /// Open the database with optional SQLCipher encryption key at the specified path
     ///
     /// The key should be in SQLCipher PRAGMA key format:
@@ -190,6 +192,19 @@ impl Database {
               PRIMARY KEY (uuid, simhash, source, value_norm)
             );
             CREATE INDEX IF NOT EXISTS idx_simhashes_simhash ON simhashes(simhash);
+
+            -- Sync metadata: tracks which contacts are synced with which remotes
+            CREATE TABLE IF NOT EXISTS sync_metadata (
+              contact_path TEXT NOT NULL,
+              remote_name TEXT NOT NULL,
+              remote_href TEXT NOT NULL,
+              remote_etag TEXT,
+              last_synced INTEGER,
+              local_modified INTEGER DEFAULT 0,
+              PRIMARY KEY (contact_path, remote_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sync_metadata_remote ON sync_metadata(remote_name);
+
         "#,
         )?;
 
@@ -214,6 +229,8 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(
             r#"
+            DROP TABLE IF EXISTS sync_metadata;
+            DROP TABLE IF EXISTS remote_state;  -- Legacy table, keep in drop for migration
             DROP TABLE IF EXISTS simhashes;
             DROP TABLE IF EXISTS props;
             DROP TABLE IF EXISTS items;
@@ -693,6 +710,78 @@ impl Database {
             .prepare("SELECT 1 FROM props WHERE field = 'EMAIL' AND value_norm = ?1 LIMIT 1")?;
         Ok(stmt.exists(params![email_norm])?)
     }
+
+    // =========================================================================
+    // Sync metadata methods
+    // =========================================================================
+
+    /// Get all sync metadata for a remote
+    pub fn get_sync_metadata_for_remote(&self, remote_name: &str) -> Result<Vec<SyncMetadata>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT contact_path, remote_name, remote_href, remote_etag, last_synced, local_modified
+             FROM sync_metadata WHERE remote_name = ?1"
+        )?;
+
+        let rows = stmt.query_map(params![remote_name], |row| {
+            Ok(SyncMetadata {
+                contact_path: PathBuf::from(row.get::<_, String>(0)?),
+                remote_name: row.get(1)?,
+                remote_href: row.get(2)?,
+                remote_etag: row.get(3)?,
+                last_synced: row.get(4)?,
+                local_modified: row.get::<_, i64>(5)? != 0,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Upsert sync metadata for a contact
+    pub fn upsert_sync_metadata(&mut self, meta: &SyncMetadata) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO sync_metadata (contact_path, remote_name, remote_href, remote_etag, last_synced, local_modified)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(contact_path, remote_name) DO UPDATE SET
+              remote_href = excluded.remote_href,
+              remote_etag = excluded.remote_etag,
+              last_synced = excluded.last_synced,
+              local_modified = excluded.local_modified
+            "#,
+            params![
+                meta.contact_path.to_string_lossy(),
+                meta.remote_name,
+                meta.remote_href,
+                meta.remote_etag,
+                meta.last_synced,
+                if meta.local_modified { 1 } else { 0 },
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Delete sync metadata for a contact and remote
+    pub fn delete_sync_metadata(&mut self, contact_path: &Path, remote_name: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM sync_metadata WHERE contact_path = ?1 AND remote_name = ?2",
+            params![contact_path.to_string_lossy(), remote_name],
+        )?;
+        Ok(())
+    }
+
+    /// Delete all sync metadata for a remote
+    pub fn delete_all_sync_metadata_for_remote(&mut self, remote_name: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM sync_metadata WHERE remote_name = ?1",
+            params![remote_name],
+        )?;
+        Ok(())
+    }
+
 }
 
 fn row_to_list_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContactListEntry> {

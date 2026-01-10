@@ -225,3 +225,42 @@ type = "age"
 age_identity = "~/.config/rldx/age-identity.txt"
 # Age recipient public key (starts with "age1...")
 age_recipient = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
+
+# =============================================================================
+# Sync Configuration (optional)
+# =============================================================================
+# Global settings for CardDAV synchronization.
+
+[sync]
+# Default conflict resolution when local and remote both changed.
+# Values: "ours" (local wins) or "theirs" (remote wins)
+# Default: "theirs"
+conflict_prefer = "theirs"
+
+# =============================================================================
+# Remote Servers (optional)
+# =============================================================================
+# Configure CardDAV servers to sync with.
+# Run 'rldx remote add' to add remotes interactively.
+#
+# Example:
+#
+# [[remotes]]
+# name = "nextcloud"                                        # Unique name
+# type = "carddav"                                          # Remote type
+# url = "https://cloud.example.com/remote.php/dav"          # Server URL
+# username = "user"                                         # Username
+# address_book = "contacts"                                 # Address book name
+# password_cmd = "pass show cloud/nextcloud"                # Command to get password
+# # password_file = "~/.secrets/nextcloud"                  # Or file path
+# # password = "secret"                                     # Or plaintext (not recommended)
+# conflict_prefer = "ours"                                  # Override global setting
+# local_book = "nextcloud"                                  # Subdirectory in vdir
+#
+# [[remotes]]
+# name = "fastmail"
+# type = "carddav"
+# url = "https://carddav.fastmail.com"
+# username = "user@fastmail.com"
+# address_book = "Default"
+# password_cmd = "pass show email/fastmail"

@@ -5,7 +5,6 @@ edition = "2021"
 
 [features]
 default = []
-dav = ["libdav"]
 
 [dependencies]
 anyhow = "1.0.86"
@@ -14,7 +13,6 @@ clap = { version = "4.5.4", features = ["derive"] }
 crossterm = "0.27.0"
 directories = "5.0.1"
 image = { version = "0.24.9", default-features = false, features = ["png", "jpeg"] }
-libdav = { version = "0.9.6", optional = true }
 ratatui = "0.28.1"
 ratatui-image = "0.7"
 tui-input = "0.8"
@@ -42,6 +40,15 @@ indicatif = "0.17"
 simhash = "0.2"
 bktree = "1.0"
 age = { version = "0.11", default-features = false, features = ["armor"] }
+
+# CardDAV sync dependencies
+libdav = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+hyper = "1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-tokio"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1"] }
+tower-http = { version = "0.6", features = ["auth"] }
+http = "1"
 
 [dev-dependencies]
 tempfile = "3"

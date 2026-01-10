@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use directories::BaseDirs;
@@ -23,6 +25,8 @@ pub struct Config {
     pub top_bar: TopBarConfig,
     pub maildir_import: MaildirImportConfig,
     pub encryption: EncryptionConfig,
+    pub sync: SyncConfig,
+    pub remotes: Vec<RemoteConfig>,
 }
 
 // =============================================================================
@@ -38,24 +42,7 @@ pub enum EncryptionType {
     Age,
 }
 
-impl EncryptionType {
-    /// Parse from string (case-insensitive)
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "gpg" => Some(EncryptionType::Gpg),
-            "age" => Some(EncryptionType::Age),
-            _ => None,
-        }
-    }
 
-    /// File extension for encrypted vCard files
-    pub fn vcf_extension(&self) -> &'static str {
-        match self {
-            EncryptionType::Gpg => "vcf.gpg",
-            EncryptionType::Age => "vcf.age",
-        }
-    }
-}
 
 /// Encryption configuration
 #[derive(Debug, Clone)]
@@ -111,6 +98,188 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
         }
     }
     path.to_path_buf()
+}
+
+// =============================================================================
+// Sync Configuration
+// =============================================================================
+
+/// Global sync configuration
+#[derive(Debug, Clone)]
+pub struct SyncConfig {
+    /// Default conflict resolution preference: "ours" (local wins) or "theirs" (remote wins)
+    pub conflict_prefer: ConflictPreference,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            conflict_prefer: ConflictPreference::Theirs,
+        }
+    }
+}
+
+/// Conflict resolution preference
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictPreference {
+    /// Local changes win in conflicts
+    Ours,
+    /// Remote changes win in conflicts
+    Theirs,
+}
+
+impl ConflictPreference {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ours" | "local" => Some(ConflictPreference::Ours),
+            "theirs" | "remote" => Some(ConflictPreference::Theirs),
+            _ => None,
+        }
+    }
+}
+
+// =============================================================================
+// Remote Configuration
+// =============================================================================
+
+/// Remote type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteType {
+    CardDav,
+}
+
+impl RemoteType {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "carddav" => Some(RemoteType::CardDav),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RemoteType::CardDav => "carddav",
+        }
+    }
+}
+
+/// Password retrieval method
+#[derive(Debug, Clone)]
+pub enum PasswordSource {
+    /// Password stored directly (not recommended for production)
+    Plain(String),
+    /// Read password from a file
+    File(PathBuf),
+    /// Execute a command to get the password (e.g., "pass show x")
+    Command(String),
+}
+
+impl PasswordSource {
+    /// Retrieve the password from this source
+    pub fn get_password(&self) -> Result<String> {
+        match self {
+            PasswordSource::Plain(s) => Ok(s.clone()),
+            PasswordSource::File(path) => {
+                let expanded = expand_tilde(path);
+                let content = fs::read_to_string(&expanded)
+                    .with_context(|| format!("failed to read password file: {}", expanded.display()))?;
+                // Take first line, trim whitespace
+                Ok(content.lines().next().unwrap_or("").trim().to_string())
+            }
+            PasswordSource::Command(cmd) => {
+                let output = if cfg!(target_os = "windows") {
+                    Command::new("cmd")
+                        .args(["/C", cmd])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .output()
+                } else {
+                    Command::new("sh")
+                        .args(["-c", cmd])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .output()
+                };
+
+                let output = output
+                    .with_context(|| format!("failed to execute password command: {}", cmd))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!("password command failed: {}", stderr.trim());
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Take first line, trim whitespace
+                Ok(stdout.lines().next().unwrap_or("").trim().to_string())
+            }
+        }
+    }
+
+    /// Prompt for password interactively from stdin
+    pub fn prompt_password(prompt: &str) -> Result<String> {
+        eprint!("{}", prompt);
+        std::io::stderr().flush()?;
+
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+        Ok(line.trim().to_string())
+    }
+}
+
+/// Configuration for a remote CardDAV server
+#[derive(Debug, Clone)]
+pub struct RemoteConfig {
+    /// Unique name for this remote
+    pub name: String,
+    /// Remote type (currently only CardDAV)
+    pub remote_type: RemoteType,
+    /// Server URL (e.g., "https://cloud.example.com/remote.php/dav")
+    pub url: String,
+    /// Username for authentication
+    pub username: String,
+    /// Address book name/path on the server
+    pub address_book: String,
+    /// Password source (command, file, or plain)
+    pub password_source: Option<PasswordSource>,
+    /// Per-remote conflict resolution (overrides global)
+    pub conflict_prefer: Option<ConflictPreference>,
+    /// Local subdirectory within vdir for this remote's contacts (None = root vdir)
+    pub local_book: Option<String>,
+}
+
+impl RemoteConfig {
+    /// Get password, prompting if no source configured
+    pub fn get_password(&self) -> Result<String> {
+        match &self.password_source {
+            Some(source) => source.get_password(),
+            None => PasswordSource::prompt_password(&format!(
+                "Password for {}@{}: ",
+                self.username, self.url
+            )),
+        }
+    }
+
+    /// Validate the remote configuration
+    pub fn validate(&self) -> Result<()> {
+        if self.name.is_empty() {
+            bail!("remote name cannot be empty");
+        }
+        if self.name.contains(|c: char| c.is_whitespace() || c == '/') {
+            bail!("remote name cannot contain whitespace or '/'");
+        }
+        if self.url.is_empty() {
+            bail!("remote URL cannot be empty");
+        }
+        if self.username.is_empty() {
+            bail!("remote username cannot be empty");
+        }
+        if self.address_book.is_empty() {
+            bail!("remote address_book cannot be empty");
+        }
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -995,6 +1164,10 @@ struct ConfigFile {
     maildir_import: MaildirImportFile,
     #[serde(default)]
     encryption: EncryptionFile,
+    #[serde(default)]
+    sync: SyncFile,
+    #[serde(default)]
+    remotes: Vec<RemoteFile>,
 }
 
 impl Default for ConfigFile {
@@ -1010,6 +1183,8 @@ impl Default for ConfigFile {
             top_bar: TopBarFile::default(),
             maildir_import: MaildirImportFile::default(),
             encryption: EncryptionFile::default(),
+            sync: SyncFile::default(),
+            remotes: Vec::new(),
         }
     }
 }
@@ -1173,6 +1348,97 @@ impl EncryptionFile {
     }
 }
 
+// =============================================================================
+// Sync File Deserialization
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct SyncFile {
+    conflict_prefer: Option<String>,
+}
+
+impl Default for SyncFile {
+    fn default() -> Self {
+        Self {
+            conflict_prefer: None,
+        }
+    }
+}
+
+impl From<SyncFile> for SyncConfig {
+    fn from(file: SyncFile) -> Self {
+        let conflict_prefer = file
+            .conflict_prefer
+            .as_deref()
+            .and_then(ConflictPreference::from_str)
+            .unwrap_or(ConflictPreference::Theirs);
+
+        SyncConfig { conflict_prefer }
+    }
+}
+
+// =============================================================================
+// Remote File Deserialization
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+struct RemoteFile {
+    name: String,
+    #[serde(rename = "type")]
+    remote_type: String,
+    url: String,
+    username: String,
+    address_book: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    password_file: Option<String>,
+    #[serde(default)]
+    password_cmd: Option<String>,
+    #[serde(default)]
+    conflict_prefer: Option<String>,
+    #[serde(default)]
+    local_book: Option<String>,
+}
+
+impl RemoteFile {
+    fn into_config(self) -> Result<RemoteConfig> {
+        let remote_type = RemoteType::from_str(&self.remote_type)
+            .ok_or_else(|| anyhow!("invalid remote type '{}', expected: carddav", self.remote_type))?;
+
+        // Determine password source (priority: password_cmd > password_file > password)
+        let password_source = if let Some(cmd) = self.password_cmd {
+            Some(PasswordSource::Command(cmd))
+        } else if let Some(file) = self.password_file {
+            Some(PasswordSource::File(expand_tilde(&PathBuf::from(file))))
+        } else if let Some(plain) = self.password {
+            Some(PasswordSource::Plain(plain))
+        } else {
+            None // Will prompt interactively
+        };
+
+        let conflict_prefer = self
+            .conflict_prefer
+            .as_deref()
+            .and_then(ConflictPreference::from_str);
+
+        let config = RemoteConfig {
+            name: self.name,
+            remote_type,
+            url: self.url,
+            username: self.username,
+            address_book: self.address_book,
+            password_source,
+            conflict_prefer,
+            local_book: self.local_book,
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 fn default_fields_first_pane() -> Vec<String> {
     vec![
         "fname".to_string(),
@@ -1208,11 +1474,6 @@ pub fn ensure_config_dir() -> Result<()> {
             .with_context(|| format!("failed to create config dir: {}", dir.display()))?;
     }
     Ok(())
-}
-
-/// Load config from default location
-pub fn load() -> Result<Config> {
-    load_from(None)
 }
 
 /// Load config from specified path (or default if None)
@@ -1279,6 +1540,26 @@ pub fn load_from(custom_path: Option<&Path>) -> Result<Config> {
         .into_config()
         .with_context(|| "failed to parse encryption configuration")?;
 
+    // Parse sync config
+    let sync: SyncConfig = cfg_file.sync.into();
+
+    // Parse and validate remote configs
+    let mut remotes = Vec::new();
+    for (i, remote_file) in cfg_file.remotes.into_iter().enumerate() {
+        let remote = remote_file
+            .into_config()
+            .with_context(|| format!("failed to parse remote configuration at index {}", i))?;
+        remotes.push(remote);
+    }
+
+    // Check for duplicate remote names
+    let mut seen_names = HashSet::new();
+    for remote in &remotes {
+        if !seen_names.insert(&remote.name) {
+            bail!("duplicate remote name: {}", remote.name);
+        }
+    }
+
     Ok(Config {
         config_path: path,
         vdir,
@@ -1291,6 +1572,8 @@ pub fn load_from(custom_path: Option<&Path>) -> Result<Config> {
         top_bar: cfg_file.top_bar.into(),
         maildir_import: cfg_file.maildir_import.into(),
         encryption,
+        sync,
+        remotes,
     })
 }
 
@@ -1314,6 +1597,8 @@ fn warn_unknown_keys(value: &toml::Value) {
         "top_bar".to_string(),
         "maildir_import".to_string(),
         "encryption".to_string(),
+        "sync".to_string(),
+        "remotes".to_string(),
     ]);
 
     for key in table.keys() {
@@ -1340,6 +1625,14 @@ fn warn_unknown_keys(value: &toml::Value) {
 
     if let Some(encryption_val) = table.get("encryption") {
         warn_unknown_encryption_keys(encryption_val);
+    }
+
+    if let Some(sync_val) = table.get("sync") {
+        warn_unknown_sync_keys(sync_val);
+    }
+
+    if let Some(remotes_val) = table.get("remotes") {
+        warn_unknown_remotes_keys(remotes_val);
     }
 }
 
@@ -1563,6 +1856,47 @@ fn warn_unknown_encryption_keys(value: &toml::Value) {
     for key in table.keys() {
         if !known.contains(key) {
             eprintln!("warning: unknown encryption entry `{}`", key);
+        }
+    }
+}
+
+fn warn_unknown_sync_keys(value: &toml::Value) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let known = HashSet::from(["conflict_prefer".to_string()]);
+    for key in table.keys() {
+        if !known.contains(key) {
+            eprintln!("warning: unknown sync entry `{}`", key);
+        }
+    }
+}
+
+fn warn_unknown_remotes_keys(value: &toml::Value) {
+    let Some(arr) = value.as_array() else {
+        return;
+    };
+
+    let known = HashSet::from([
+        "name".to_string(),
+        "type".to_string(),
+        "url".to_string(),
+        "username".to_string(),
+        "address_book".to_string(),
+        "password".to_string(),
+        "password_file".to_string(),
+        "password_cmd".to_string(),
+        "conflict_prefer".to_string(),
+        "local_book".to_string(),
+    ]);
+
+    for (i, item) in arr.iter().enumerate() {
+        if let Some(table) = item.as_table() {
+            for key in table.keys() {
+                if !known.contains(key) {
+                    eprintln!("warning: unknown remotes[{}] entry `{}`", i, key);
+                }
+            }
         }
     }
 }

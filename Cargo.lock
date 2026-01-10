@@ -1744,9 +1744,9 @@ checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libdav"
-version = "0.9.6"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ce4c102c0169dfebcb6e61c19d0e851c644402f11821d6f0831ce4b4472747a"
+checksum = "3f32d640f411a74bb004b81e3860ed058ff2ceb6b4dea1e8785601c9dbb2a0ff"
 dependencies = [
  "domain",
  "http",
@@ -1894,6 +1894,12 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minimal-lexical"
@@ -2706,6 +2712,10 @@ dependencies = [
  "deunicode",
  "directories",
  "home",
+ "http",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "image 0.24.9",
  "indicatif",
  "libdav",
@@ -2727,7 +2737,9 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "time",
+ "tokio",
  "toml 0.8.23",
+ "tower-http",
  "tui-input",
  "tui-widgets",
  "unicode-script",
@@ -3526,12 +3538,14 @@ version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adc82fd73de2a9722ac5da747f12383d2bfdb93591ee6c58486e0097890f05f2"
 dependencies = [
+ "base64 0.22.1",
  "bitflags 2.10.0",
  "bytes",
  "futures-util",
  "http",
  "http-body",
  "iri-string",
+ "mime",
  "pin-project-lite",
  "tower",
  "tower-layer",
