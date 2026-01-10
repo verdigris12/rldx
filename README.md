@@ -8,7 +8,7 @@ RLDX (pronounced "please-do-not-sue-me") - a TUI attepmt to recreate the ease of
 
 - Browse and search contacts stored as vCard (.vcf) files
 - Import contacts from Google Contacts CSV exports
-- abook combatible
+- abook compatible
 - Basic contact editor.
 
 ## Installation
