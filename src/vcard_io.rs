@@ -1232,38 +1232,80 @@ pub fn merge_cards(cards: Vec<Vcard>) -> Option<Vcard> {
 /// Merge two vCards into one.
 /// Card `a` is the base; properties from `b` are added if not already present.
 pub fn merge_two_cards(mut a: Vcard, b: Vcard) -> Vcard {
-    // FN: keep a.FN; add b.FN[0] to NICKNAME if not present
-    let a_fn = a
-        .formatted_name
-        .first()
-        .map(|p| p.value.clone())
-        .unwrap_or_default();
+    // FN: use longer FN, add shorter as nickname
+    let a_fn = a.formatted_name.first().map(|p| p.value.clone()).unwrap_or_default();
+    let b_fn = b.formatted_name.first().map(|p| p.value.clone()).unwrap_or_default();
     
-    if let Some(b_fn) = b.formatted_name.first() {
-        let b_name = b_fn.value.trim();
-        if !b_name.is_empty()
-            && !eq_ignore_ascii_case_any(
-                b_name,
-                std::iter::once(a_fn.as_str()).chain(a.nickname.iter().map(|p| p.value.as_str())),
-            )
-        {
-            a.nickname.push(TextProperty {
-                group: None,
-                value: b_name.to_string(),
-                parameters: None,
-            });
+    let a_fn_trimmed = a_fn.trim();
+    let b_fn_trimmed = b_fn.trim();
+    
+    if !b_fn_trimmed.is_empty() {
+        if b_fn_trimmed.len() > a_fn_trimmed.len() {
+            // B's FN is longer - use it as primary, A's FN becomes nickname
+            if let Some(b_fn_prop) = b.formatted_name.first() {
+                // Replace A's FN with B's
+                if a.formatted_name.is_empty() {
+                    a.formatted_name.push(b_fn_prop.clone());
+                } else {
+                    a.formatted_name[0] = b_fn_prop.clone();
+                }
+            }
+            // Add A's FN as nickname if not already present
+            if !a_fn_trimmed.is_empty() {
+                add_nickname_if_unique(&mut a, a_fn_trimmed);
+            }
+        } else if !a_fn_trimmed.eq_ignore_ascii_case(b_fn_trimmed) {
+            // A's FN is longer or equal but different - add B's FN as nickname
+            add_nickname_if_unique(&mut a, b_fn_trimmed);
         }
     }
 
-    // N*: prefer a.name; ignore b.name
+    // N: component-wise merge with conflict detection
+    // Components: [0]=family, [1]=given, [2]=additional, [3]=prefix, [4]=suffix
+    let mut had_conflict = false;
+    
+    if let Some(ref b_name) = b.name {
+        if a.name.is_none() {
+            // A has no name, use B's entirely
+            a.name = Some(b_name.clone());
+        } else if let Some(ref mut a_name) = a.name {
+            // Both have names - merge component by component
+            // Ensure both have 5 components
+            while a_name.value.len() < 5 {
+                a_name.value.push(String::new());
+            }
+            
+            for i in 0..5 {
+                let a_comp = a_name.value.get(i).map(|s| s.trim()).unwrap_or("");
+                let b_comp = b_name.value.get(i).map(|s| s.trim()).unwrap_or("");
+                
+                if a_comp.is_empty() && !b_comp.is_empty() {
+                    // A is empty, use B
+                    a_name.value[i] = b_comp.to_string();
+                } else if !a_comp.is_empty() && !b_comp.is_empty() 
+                    && !a_comp.eq_ignore_ascii_case(b_comp) 
+                {
+                    // Conflict: both have values and they differ
+                    had_conflict = true;
+                    // Keep A's value (already there)
+                }
+            }
+            
+            // If there was a conflict, add B's full name as alias
+            if had_conflict {
+                let b_display = name_to_display_string(b_name);
+                if !b_display.is_empty() {
+                    add_nickname_if_unique(&mut a, &b_display);
+                }
+            }
+        }
+    }
 
     // NICKNAME: merge uniques from b
     for nick in b.nickname.iter() {
         let val = nick.value.trim();
-        if !val.is_empty()
-            && !eq_ignore_ascii_case_any(val, a.nickname.iter().map(|p| p.value.as_str()))
-        {
-            a.nickname.push(nick.clone());
+        if !val.is_empty() {
+            add_nickname_if_unique(&mut a, val);
         }
     }
 
@@ -1305,6 +1347,41 @@ pub fn merge_two_cards(mut a: Vcard, b: Vcard) -> Vcard {
     a.extensions.extend(b.extensions.clone());
 
     a
+}
+
+/// Add a nickname to the card if not already present (case-insensitive check)
+fn add_nickname_if_unique(card: &mut Vcard, nickname: &str) {
+    let dominated = std::iter::once(
+        card.formatted_name.first().map(|p| p.value.as_str()).unwrap_or("")
+    ).chain(card.nickname.iter().map(|p| p.value.as_str()));
+    
+    if !eq_ignore_ascii_case_any(nickname, dominated) {
+        card.nickname.push(TextProperty {
+            group: None,
+            value: nickname.to_string(),
+            parameters: None,
+        });
+    }
+}
+
+/// Convert a structured name (N property) to a display string.
+/// Format: "prefix given additional family suffix" (skipping empty components)
+fn name_to_display_string(name: &vcard4::property::TextListProperty) -> String {
+    // N components: [0]=family, [1]=given, [2]=additional, [3]=prefix, [4]=suffix
+    // Display order: prefix given additional family suffix
+    let family = name.value.get(0).map(|s| s.trim()).unwrap_or("");
+    let given = name.value.get(1).map(|s| s.trim()).unwrap_or("");
+    let additional = name.value.get(2).map(|s| s.trim()).unwrap_or("");
+    let prefix = name.value.get(3).map(|s| s.trim()).unwrap_or("");
+    let suffix = name.value.get(4).map(|s| s.trim()).unwrap_or("");
+    
+    // Build in display order: prefix given additional family suffix
+    let parts: Vec<&str> = [prefix, given, additional, family, suffix]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    
+    parts.join(" ")
 }
 
 /// Result of a merge operation
@@ -1543,5 +1620,273 @@ UID:{}
 
         // Secondary FN as nickname
         assert!(merged.nickname.iter().any(|n| n.value == "Secondary"));
+    }
+
+    // =========================================================================
+    // FN merge tests - use longer FN
+    // =========================================================================
+
+    #[test]
+    fn test_fn_merge_uses_longer_fn() {
+        let card1 = make_card("John", None, None);
+        let card2 = make_card("John William Smith", None, None);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // Longer FN should be primary
+        assert_eq!(merged.formatted_name[0].value, "John William Smith");
+        // Shorter FN should be nickname
+        assert!(merged.nickname.iter().any(|n| n.value == "John"));
+    }
+
+    #[test]
+    fn test_fn_merge_keeps_longer_a() {
+        let card1 = make_card("Dr. John William Smith Jr.", None, None);
+        let card2 = make_card("John Smith", None, None);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // A's FN is longer, should be kept
+        assert_eq!(merged.formatted_name[0].value, "Dr. John William Smith Jr.");
+        // B's FN should be nickname
+        assert!(merged.nickname.iter().any(|n| n.value == "John Smith"));
+    }
+
+    #[test]
+    fn test_fn_merge_equal_length_same_no_nickname() {
+        let card1 = make_card("John Smith", None, None);
+        let card2 = make_card("John Smith", None, None);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // Same FN, no nickname added
+        assert_eq!(merged.formatted_name[0].value, "John Smith");
+        assert!(merged.nickname.is_empty());
+    }
+
+    #[test]
+    fn test_fn_merge_equal_length_case_insensitive() {
+        let card1 = make_card("John Smith", None, None);
+        let card2 = make_card("JOHN SMITH", None, None);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // Same FN (case-insensitive), no nickname added
+        assert_eq!(merged.formatted_name[0].value, "John Smith");
+        assert!(merged.nickname.is_empty());
+    }
+
+    #[test]
+    fn test_fn_merge_strips_whitespace_for_comparison() {
+        let card1 = make_card("  John  ", None, None);
+        let card2 = make_card("John William Smith", None, None);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // "John William Smith" is longer than "John" (after trimming)
+        assert_eq!(merged.formatted_name[0].value, "John William Smith");
+    }
+
+    // =========================================================================
+    // N (structured name) merge tests
+    // =========================================================================
+
+    fn make_card_with_name(fn_name: &str, name_components: &[&str]) -> Vcard {
+        // N components: family;given;additional;prefix;suffix
+        let n_value = name_components.join(";");
+        let vcard_str = format!(
+            r#"BEGIN:VCARD
+VERSION:4.0
+FN:{}
+N:{}
+UID:{}
+END:VCARD"#,
+            fn_name,
+            n_value,
+            uuid::Uuid::new_v4(),
+        );
+        parse_str(&vcard_str, None).unwrap().cards.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn test_n_merge_fills_empty_components() {
+        // A has only given name, B has family name
+        let card1 = make_card_with_name("John", &["", "John", "", "", ""]);
+        let card2 = make_card_with_name("John Smith", &["Smith", "", "", "", ""]);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // Should have both family and given filled
+        let name = merged.name.as_ref().unwrap();
+        assert_eq!(name.value.get(0).map(|s| s.as_str()), Some("Smith")); // family from B
+        assert_eq!(name.value.get(1).map(|s| s.as_str()), Some("John"));  // given from A
+    }
+
+    #[test]
+    fn test_n_merge_fills_prefix_suffix() {
+        let card1 = make_card_with_name("John Smith", &["Smith", "John", "", "", ""]);
+        let card2 = make_card_with_name("Dr. John Smith Jr.", &["Smith", "John", "William", "Dr.", "Jr."]);
+
+        let merged = merge_two_cards(card1, card2);
+
+        let name = merged.name.as_ref().unwrap();
+        assert_eq!(name.value.get(0).map(|s| s.as_str()), Some("Smith"));   // family
+        assert_eq!(name.value.get(1).map(|s| s.as_str()), Some("John"));    // given
+        assert_eq!(name.value.get(2).map(|s| s.as_str()), Some("William")); // additional from B
+        assert_eq!(name.value.get(3).map(|s| s.as_str()), Some("Dr."));     // prefix from B
+        assert_eq!(name.value.get(4).map(|s| s.as_str()), Some("Jr."));     // suffix from B
+    }
+
+    #[test]
+    fn test_n_merge_conflict_keeps_a_adds_alias() {
+        // Conflict on given name: John vs Jonathan
+        // Use same-length FNs to avoid FN swap complicating the test
+        let card1 = make_card_with_name("John Smith", &["Smith", "John", "", "", ""]);
+        let card2 = make_card_with_name("Jon. Smith", &["Smith", "Jonathan", "", "", ""]);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // A's FN kept (same length, A wins), B's FN added as nickname
+        assert_eq!(merged.formatted_name[0].value, "John Smith");
+        assert!(merged.nickname.iter().any(|n| n.value == "Jon. Smith"));
+
+        // A's given name kept in N
+        let name = merged.name.as_ref().unwrap();
+        assert_eq!(name.value.get(1).map(|s| s.as_str()), Some("John"));
+
+        // B's full N as alias: "Jonathan Smith" (different from FN "Jon. Smith")
+        assert!(
+            merged.nickname.iter().any(|n| n.value == "Jonathan Smith"),
+            "Should have 'Jonathan Smith' as nickname, got: {:?}",
+            merged.nickname.iter().map(|n| &n.value).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_n_merge_conflict_full_name_alias() {
+        // A: Smith;John;;;
+        // B: Jones;Jonathan;William;Dr.;Jr.
+        // B's FN is longer, so it becomes primary FN
+        let card1 = make_card_with_name("John Smith", &["Smith", "John", "", "", ""]);
+        let card2 = make_card_with_name("Dr. Jonathan William Jones Jr.", &["Jones", "Jonathan", "William", "Dr.", "Jr."]);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // B's FN is longer, so it becomes primary
+        assert_eq!(merged.formatted_name[0].value, "Dr. Jonathan William Jones Jr.");
+        // A's FN added as nickname
+        assert!(merged.nickname.iter().any(|n| n.value == "John Smith"));
+
+        // A's values kept where present (A is base for N merge)
+        let name = merged.name.as_ref().unwrap();
+        assert_eq!(name.value.get(0).map(|s| s.as_str()), Some("Smith")); // A's family
+        assert_eq!(name.value.get(1).map(|s| s.as_str()), Some("John"));  // A's given
+
+        // B's values used for empty components
+        assert_eq!(name.value.get(2).map(|s| s.as_str()), Some("William")); // B's additional
+        assert_eq!(name.value.get(3).map(|s| s.as_str()), Some("Dr."));     // B's prefix
+        assert_eq!(name.value.get(4).map(|s| s.as_str()), Some("Jr."));     // B's suffix
+
+        // B's N-based alias would be "Dr. Jonathan William Jones Jr." but it matches FN
+        // so it's not added as duplicate. Instead we should have A's FN as nickname.
+        // The conflict is recorded, but the alias happens to match FN.
+        // This is correct behavior - no duplicate FN in nicknames.
+    }
+
+    #[test]
+    fn test_n_merge_no_conflict_no_alias() {
+        // Same names, different components filled - no conflict
+        let card1 = make_card_with_name("John Smith", &["Smith", "John", "", "", ""]);
+        let card2 = make_card_with_name("John Smith", &["Smith", "John", "", "", ""]);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // No nickname from N merge (only from FN if different)
+        // Since FNs are same, no nicknames at all
+        assert!(merged.nickname.is_empty());
+    }
+
+    #[test]
+    fn test_n_merge_case_insensitive_no_conflict() {
+        let card1 = make_card_with_name("John Smith", &["Smith", "John", "", "", ""]);
+        let card2 = make_card_with_name("John Smith", &["SMITH", "JOHN", "", "", ""]);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // Same names case-insensitively, no conflict
+        let name = merged.name.as_ref().unwrap();
+        assert_eq!(name.value.get(0).map(|s| s.as_str()), Some("Smith")); // A's case preserved
+        assert_eq!(name.value.get(1).map(|s| s.as_str()), Some("John"));
+
+        // No alias added
+        assert!(merged.nickname.is_empty());
+    }
+
+    #[test]
+    fn test_n_merge_b_has_no_name() {
+        let card1 = make_card_with_name("John Smith", &["Smith", "John", "", "", ""]);
+        let card2 = make_card("Johnny", None, None); // No N property
+
+        let merged = merge_two_cards(card1, card2);
+
+        // A's name preserved
+        let name = merged.name.as_ref().unwrap();
+        assert_eq!(name.value.get(0).map(|s| s.as_str()), Some("Smith"));
+        assert_eq!(name.value.get(1).map(|s| s.as_str()), Some("John"));
+    }
+
+    #[test]
+    fn test_n_merge_a_has_no_name() {
+        let card1 = make_card("John", None, None); // No N property
+        let card2 = make_card_with_name("John Smith", &["Smith", "John", "W", "Dr.", "Jr."]);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // B's name used entirely
+        let name = merged.name.as_ref().unwrap();
+        assert_eq!(name.value.get(0).map(|s| s.as_str()), Some("Smith"));
+        assert_eq!(name.value.get(1).map(|s| s.as_str()), Some("John"));
+        assert_eq!(name.value.get(2).map(|s| s.as_str()), Some("W"));
+        assert_eq!(name.value.get(3).map(|s| s.as_str()), Some("Dr."));
+        assert_eq!(name.value.get(4).map(|s| s.as_str()), Some("Jr."));
+    }
+
+    #[test]
+    fn test_name_to_display_string() {
+        // Test the helper function directly
+        let name = vcard4::property::TextListProperty {
+            group: None,
+            value: vec![
+                "Smith".to_string(),     // family
+                "John".to_string(),      // given
+                "William".to_string(),   // additional
+                "Dr.".to_string(),       // prefix
+                "Jr.".to_string(),       // suffix
+            ],
+            parameters: None,
+            delimiter: vcard4::property::TextListDelimiter::SemiColon,
+        };
+
+        let display = name_to_display_string(&name);
+        assert_eq!(display, "Dr. John William Smith Jr.");
+    }
+
+    #[test]
+    fn test_name_to_display_string_skips_empty() {
+        let name = vcard4::property::TextListProperty {
+            group: None,
+            value: vec![
+                "Smith".to_string(),  // family
+                "John".to_string(),   // given
+                "".to_string(),       // additional (empty)
+                "".to_string(),       // prefix (empty)
+                "".to_string(),       // suffix (empty)
+            ],
+            parameters: None,
+            delimiter: vcard4::property::TextListDelimiter::SemiColon,
+        };
+
+        let display = name_to_display_string(&name);
+        assert_eq!(display, "John Smith");
     }
 }
