@@ -219,6 +219,29 @@ impl AgeProvider {
         })
     }
 
+    /// Create a new ephemeral AgeProvider for testing.
+    /// Generates a new identity and writes it to a temp file.
+    #[cfg(test)]
+    pub fn new_ephemeral(temp_dir: &std::path::Path) -> Result<Self> {
+        use age::secrecy::ExposeSecret;
+        
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        
+        let identity_content = format!(
+            "# test identity\n{}\n",
+            identity.to_string().expose_secret()
+        );
+        
+        let identity_path = temp_dir.join("age-identity.txt");
+        std::fs::write(&identity_path, identity_content)?;
+        
+        Ok(Self {
+            identity_path,
+            recipient,
+        })
+    }
+
     /// Read the identity file and parse identities
     fn read_identities(&self) -> Result<Vec<age::x25519::Identity>> {
         use std::fs;

@@ -29,7 +29,7 @@ use crate::indexer;
 use crate::search;
 use crate::vcard_io;
 use crate::vdir;
-use vcard4::{property::TextProperty, Vcard};
+use vcard4::property::TextProperty;
 
 use image::{self, DynamicImage};
 
@@ -1047,42 +1047,19 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        // Parse cards and merge inductively
-        let default_region = self.config.phone_region.as_deref();
-        let mut cards: Vec<Vcard> = Vec::new();
-        for path in &paths {
-            let parsed = vcard_io::parse_file(path, default_region, self.provider)?;
-            if let Some(card) = parsed.cards.into_iter().next() {
-                cards.push(card);
-            }
-        }
-        if cards.len() < 2 {
-            self.set_status("Unable to load all marked contacts");
-            return Ok(());
-        }
-
-        let mut merged = cards.remove(0);
-        for other in cards.into_iter() {
-            merged = merge_two_cards(merged, other);
-        }
-
-        // Ensure UID and REV
-        let _uid = vcard_io::ensure_uuid_uid(&mut merged)?;
-        vcard_io::touch_rev(&mut merged);
-
-        // Determine target path in same directory as first contact
-        let first_dir = paths
-            .get(0)
+        // Determine target directory (same as first contact)
+        let target_dir = paths
+            .first()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| self.config.vdir.clone());
-        let mut used = vdir::existing_stems(&self.config.vdir)?;
-        let uuid_str = vcard_io::card_uid(&merged).unwrap_or_default();
-        let uuid = uuid::Uuid::parse_str(&uuid_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        let stem = vdir::select_filename(&uuid, &mut used, None);
-        let target = first_dir.join(format!("{stem}.vcf"));
 
-        // Write merged card
-        vdir::write_atomic(&target, &vcard_io::card_to_bytes(&merged))?;
+        // Merge using the standalone function (handles encryption properly)
+        let result = vcard_io::merge_vcard_files(
+            &paths,
+            &target_dir,
+            self.provider,
+            self.config.phone_region.as_deref(),
+        )?;
 
         // Remove old files
         for path in &paths {
@@ -1092,8 +1069,8 @@ impl<'a> App<'a> {
         // Update DB: delete old, insert new
         self.db
             .delete_items_by_paths(paths.clone().into_iter())?;
-        let state = vdir::compute_file_state(&target)?;
-        let record = indexer::build_record(&target, &merged, &state, None)?;
+        let state = vdir::compute_file_state(&result.path)?;
+        let record = indexer::build_record(&result.path, &result.card, &state, None)?;
         self.db.upsert(&record.item, &record.props)?;
 
         // Refresh UI
@@ -3035,92 +3012,6 @@ fn contact_is_org(entry: &ContactListEntry) -> bool {
         }
     }
     entry.primary_org.is_some()
-}
-
-fn merge_two_cards(mut a: Vcard, b: Vcard) -> Vcard {
-    // FN: keep a.FN; add b.FN[0] to NICKNAME if not present
-    let a_fn = a
-        .formatted_name
-        .first()
-        .map(|p| p.value.clone())
-        .unwrap_or_else(|| "".to_string());
-    if let Some(b_fn) = b.formatted_name.first() {
-        let b_name = b_fn.value.trim();
-        if !b_name.is_empty()
-            && !eq_ignore_ascii_case_any(b_name, std::iter::once(a_fn.as_str()).chain(
-                a.nickname.iter().map(|p| p.value.as_str())
-            ))
-        {
-            a.nickname.push(TextProperty {
-                group: None,
-                value: b_name.to_string(),
-                parameters: None,
-            });
-        }
-    }
-
-    // N*: prefer a.name; ignore b.name
-
-    // NICKNAME: merge uniques from b
-    for nick in b.nickname.iter() {
-        let val = nick.value.trim();
-        if !val.is_empty()
-            && !eq_ignore_ascii_case_any(val, a.nickname.iter().map(|p| p.value.as_str()))
-        {
-            a.nickname.push(nick.clone());
-        }
-    }
-
-    // Append remaining list properties
-    a.photo.extend(b.photo.clone());
-    if b.bday.is_some() && a.bday.is_none() {
-        a.bday = b.bday.clone();
-    }
-    if b.anniversary.is_some() && a.anniversary.is_none() {
-        a.anniversary = b.anniversary.clone();
-    }
-    if b.gender.is_some() && a.gender.is_none() {
-        a.gender = b.gender.clone();
-    }
-    a.url.extend(b.url.clone());
-    a.address.extend(b.address.clone());
-    a.tel.extend(b.tel.clone());
-    a.email.extend(b.email.clone());
-    a.impp.extend(b.impp.clone());
-    a.lang.extend(b.lang.clone());
-    a.title.extend(b.title.clone());
-    a.role.extend(b.role.clone());
-    a.logo.extend(b.logo.clone());
-    a.org.extend(b.org.clone());
-    a.member.extend(b.member.clone());
-    a.related.extend(b.related.clone());
-    a.timezone.extend(b.timezone.clone());
-    a.geo.extend(b.geo.clone());
-    a.categories.extend(b.categories.clone());
-    a.note.extend(b.note.clone());
-    if a.prod_id.is_none() {
-        a.prod_id = b.prod_id.clone();
-    }
-    a.sound.extend(b.sound.clone());
-    a.key.extend(b.key.clone());
-    a.fburl.extend(b.fburl.clone());
-    a.cal_adr_uri.extend(b.cal_adr_uri.clone());
-    a.cal_uri.extend(b.cal_uri.clone());
-    a.extensions.extend(b.extensions.clone());
-
-    a
-}
-
-fn eq_ignore_ascii_case_any<'a, I>(needle: &str, hay: I) -> bool
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    for item in hay {
-        if needle.eq_ignore_ascii_case(item) {
-            return true;
-        }
-    }
-    false
 }
 
 fn address_book_chain_from(vdir: &Path, path: &Path) -> Vec<String> {

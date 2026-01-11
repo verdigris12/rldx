@@ -1206,3 +1206,342 @@ END:VCARD"#;
         assert_eq!(card.formatted_name.len(), 2);
     }
 }
+
+// =============================================================================
+// Merge functionality
+// =============================================================================
+
+/// Merge multiple vCards into a single card.
+/// The first card is used as the base, and properties from subsequent cards
+/// are merged in.
+pub fn merge_cards(cards: Vec<Vcard>) -> Option<Vcard> {
+    if cards.is_empty() {
+        return None;
+    }
+    
+    let mut cards = cards;
+    let mut merged = cards.remove(0);
+    
+    for other in cards {
+        merged = merge_two_cards(merged, other);
+    }
+    
+    Some(merged)
+}
+
+/// Merge two vCards into one.
+/// Card `a` is the base; properties from `b` are added if not already present.
+pub fn merge_two_cards(mut a: Vcard, b: Vcard) -> Vcard {
+    // FN: keep a.FN; add b.FN[0] to NICKNAME if not present
+    let a_fn = a
+        .formatted_name
+        .first()
+        .map(|p| p.value.clone())
+        .unwrap_or_default();
+    
+    if let Some(b_fn) = b.formatted_name.first() {
+        let b_name = b_fn.value.trim();
+        if !b_name.is_empty()
+            && !eq_ignore_ascii_case_any(
+                b_name,
+                std::iter::once(a_fn.as_str()).chain(a.nickname.iter().map(|p| p.value.as_str())),
+            )
+        {
+            a.nickname.push(TextProperty {
+                group: None,
+                value: b_name.to_string(),
+                parameters: None,
+            });
+        }
+    }
+
+    // N*: prefer a.name; ignore b.name
+
+    // NICKNAME: merge uniques from b
+    for nick in b.nickname.iter() {
+        let val = nick.value.trim();
+        if !val.is_empty()
+            && !eq_ignore_ascii_case_any(val, a.nickname.iter().map(|p| p.value.as_str()))
+        {
+            a.nickname.push(nick.clone());
+        }
+    }
+
+    // Append remaining list properties
+    a.photo.extend(b.photo.clone());
+    if b.bday.is_some() && a.bday.is_none() {
+        a.bday = b.bday.clone();
+    }
+    if b.anniversary.is_some() && a.anniversary.is_none() {
+        a.anniversary = b.anniversary.clone();
+    }
+    if b.gender.is_some() && a.gender.is_none() {
+        a.gender = b.gender.clone();
+    }
+    a.url.extend(b.url.clone());
+    a.address.extend(b.address.clone());
+    a.tel.extend(b.tel.clone());
+    a.email.extend(b.email.clone());
+    a.impp.extend(b.impp.clone());
+    a.lang.extend(b.lang.clone());
+    a.title.extend(b.title.clone());
+    a.role.extend(b.role.clone());
+    a.logo.extend(b.logo.clone());
+    a.org.extend(b.org.clone());
+    a.member.extend(b.member.clone());
+    a.related.extend(b.related.clone());
+    a.timezone.extend(b.timezone.clone());
+    a.geo.extend(b.geo.clone());
+    a.categories.extend(b.categories.clone());
+    a.note.extend(b.note.clone());
+    if a.prod_id.is_none() {
+        a.prod_id = b.prod_id.clone();
+    }
+    a.sound.extend(b.sound.clone());
+    a.key.extend(b.key.clone());
+    a.fburl.extend(b.fburl.clone());
+    a.cal_adr_uri.extend(b.cal_adr_uri.clone());
+    a.cal_uri.extend(b.cal_uri.clone());
+    a.extensions.extend(b.extensions.clone());
+
+    a
+}
+
+/// Result of a merge operation
+pub struct MergeResult {
+    /// The merged vCard
+    pub card: Vcard,
+    /// The path where the merged card was written
+    pub path: std::path::PathBuf,
+}
+
+/// Merge multiple vCard files into a single encrypted file.
+/// 
+/// - Parses all input files
+/// - Merges cards (first card is base)
+/// - Generates new UID and REV
+/// - Writes to target directory with correct encrypted extension
+/// - Returns the merged card and output path
+pub fn merge_vcard_files(
+    paths: &[std::path::PathBuf],
+    target_dir: &std::path::Path,
+    provider: &dyn CryptoProvider,
+    phone_region: Option<&str>,
+) -> Result<MergeResult> {
+    use crate::vdir;
+    
+    if paths.len() < 2 {
+        anyhow::bail!("need at least 2 files to merge");
+    }
+    
+    // Parse all cards
+    let mut cards: Vec<Vcard> = Vec::new();
+    for path in paths {
+        let parsed = parse_file(path, phone_region, provider)?;
+        if let Some(card) = parsed.cards.into_iter().next() {
+            cards.push(card);
+        }
+    }
+    
+    if cards.len() < 2 {
+        anyhow::bail!("could not parse at least 2 cards");
+    }
+    
+    // Merge
+    let mut merged = merge_cards(cards).ok_or_else(|| anyhow!("merge failed"))?;
+    
+    // Ensure UID and REV
+    let uuid = ensure_uuid_uid(&mut merged)?;
+    touch_rev(&mut merged);
+    
+    // Determine target path with correct extension
+    let mut used = vdir::existing_stems(target_dir)?;
+    let stem = vdir::select_filename(&uuid, &mut used, None);
+    let target = vdir::vcf_target_path(target_dir, &stem, provider.encryption_type());
+    
+    // Write encrypted
+    write_cards(&target, &[merged.clone()], provider)?;
+    
+    Ok(MergeResult {
+        card: merged,
+        path: target,
+    })
+}
+
+fn eq_ignore_ascii_case_any<'a, I>(needle: &str, hay: I) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    for item in hay {
+        if needle.eq_ignore_ascii_case(item) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use tempfile::TempDir;
+    use crate::crypto::AgeProvider;
+
+    fn make_card(fn_name: &str, email: Option<&str>, tel: Option<&str>) -> Vcard {
+        let vcard_str = format!(
+            r#"BEGIN:VCARD
+VERSION:4.0
+FN:{}
+UID:{}
+{}{}END:VCARD"#,
+            fn_name,
+            uuid::Uuid::new_v4(),
+            email.map(|e| format!("EMAIL:{}\r\n", e)).unwrap_or_default(),
+            tel.map(|t| format!("TEL:{}\r\n", t)).unwrap_or_default(),
+        );
+        parse_str(&vcard_str, None).unwrap().cards.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn test_merge_two_cards_combines_emails() {
+        let card1 = make_card("Alice Smith", Some("alice@example.com"), None);
+        let card2 = make_card("Alice S.", Some("alice@work.com"), None);
+
+        let merged = merge_two_cards(card1, card2);
+
+        // Should have both emails
+        assert_eq!(merged.email.len(), 2);
+        let emails: Vec<_> = merged.email.iter().map(|e| e.value.to_string()).collect();
+        assert!(emails.contains(&"alice@example.com".to_string()));
+        assert!(emails.contains(&"alice@work.com".to_string()));
+
+        // First FN kept, second FN added as nickname
+        assert_eq!(merged.formatted_name.len(), 1);
+        assert_eq!(merged.formatted_name[0].value, "Alice Smith");
+        assert!(merged.nickname.iter().any(|n| n.value == "Alice S."));
+    }
+
+    #[test]
+    fn test_merge_two_cards_combines_phones() {
+        let card1 = make_card("Bob Jones", None, Some("+1234567890"));
+        let card2 = make_card("Robert Jones", None, Some("+0987654321"));
+
+        let merged = merge_two_cards(card1, card2);
+
+        // Should have both phones
+        assert_eq!(merged.tel.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_cards_multiple() {
+        let cards = vec![
+            make_card("Person A", Some("a@test.com"), None),
+            make_card("Person B", Some("b@test.com"), None),
+            make_card("Person C", Some("c@test.com"), None),
+        ];
+
+        let merged = merge_cards(cards).unwrap();
+
+        // Should have all 3 emails
+        assert_eq!(merged.email.len(), 3);
+        
+        // First FN kept
+        assert_eq!(merged.formatted_name[0].value, "Person A");
+        
+        // Other FNs added as nicknames
+        assert_eq!(merged.nickname.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_cards_empty_returns_none() {
+        let result = merge_cards(vec![]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_vcard_files_creates_encrypted_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let vdir = temp_dir.path();
+
+        // Create age provider with ephemeral key
+        let provider = AgeProvider::new_ephemeral(vdir).unwrap();
+
+        // Create two vCard files
+        let card1 = make_card("Test User 1", Some("user1@test.com"), None);
+        let card2 = make_card("Test User 2", Some("user2@test.com"), None);
+
+        let path1 = crate::vdir::vcf_target_path(vdir, "contact1", provider.encryption_type());
+        let path2 = crate::vdir::vcf_target_path(vdir, "contact2", provider.encryption_type());
+
+        write_cards(&path1, &[card1], &provider).unwrap();
+        write_cards(&path2, &[card2], &provider).unwrap();
+
+        // Merge
+        let result = merge_vcard_files(
+            &[path1.clone(), path2.clone()],
+            vdir,
+            &provider,
+            None,
+        ).unwrap();
+
+        // Verify: output file has .vcf.age extension
+        assert!(
+            result.path.to_string_lossy().ends_with(".vcf.age"),
+            "merged file should have .vcf.age extension, got: {}",
+            result.path.display()
+        );
+
+        // Verify: output file can be decrypted
+        let parsed = parse_file(&result.path, None, &provider).unwrap();
+        assert_eq!(parsed.cards.len(), 1);
+
+        // Verify: merged card has both emails
+        let merged_card = &parsed.cards[0];
+        assert_eq!(merged_card.email.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_vcard_files_preserves_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let vdir = temp_dir.path();
+
+        let provider = AgeProvider::new_ephemeral(vdir).unwrap();
+
+        // Create cards with distinct data
+        let mut card1 = make_card("Main Contact", Some("main@test.com"), Some("+111"));
+        card1.note.push(vcard4::property::TextProperty {
+            group: None,
+            value: "Important note".to_string(),
+            parameters: None,
+        });
+
+        let card2 = make_card("Secondary", Some("secondary@test.com"), Some("+222"));
+
+        let path1 = crate::vdir::vcf_target_path(vdir, "main", provider.encryption_type());
+        let path2 = crate::vdir::vcf_target_path(vdir, "secondary", provider.encryption_type());
+
+        write_cards(&path1, &[card1], &provider).unwrap();
+        write_cards(&path2, &[card2], &provider).unwrap();
+
+        let result = merge_vcard_files(&[path1, path2], vdir, &provider, None).unwrap();
+
+        // Parse and verify
+        let parsed = parse_file(&result.path, None, &provider).unwrap();
+        let merged = &parsed.cards[0];
+
+        // Main FN preserved
+        assert_eq!(merged.formatted_name[0].value, "Main Contact");
+
+        // Both emails
+        assert_eq!(merged.email.len(), 2);
+
+        // Both phones
+        assert_eq!(merged.tel.len(), 2);
+
+        // Note preserved
+        assert_eq!(merged.note.len(), 1);
+        assert_eq!(merged.note[0].value, "Important note");
+
+        // Secondary FN as nickname
+        assert!(merged.nickname.iter().any(|n| n.value == "Secondary"));
+    }
+}
